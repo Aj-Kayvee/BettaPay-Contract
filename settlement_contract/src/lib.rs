@@ -39,7 +39,7 @@ use soroban_sdk::{
     BytesN, Env, Symbol, Vec,
 };
 
-const BPS_DENOMINATOR: i128 = 10_000;
+const BPS_DENOMINATOR: u32 = 10_000;
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
@@ -396,12 +396,10 @@ impl SettlementContract {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if rule.platform_fee_bps > BPS_DENOMINATOR as u32
-            || rule.network_fee_bps > BPS_DENOMINATOR as u32
-        {
+        if rule.platform_fee_bps > BPS_DENOMINATOR || rule.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
-        if rule.platform_fee_bps + rule.network_fee_bps > BPS_DENOMINATOR as u32 {
+        if rule.platform_fee_bps + rule.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
         if rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
@@ -468,8 +466,7 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        if new_rule.platform_fee_bps > BPS_DENOMINATOR as u32
-            || new_rule.network_fee_bps > BPS_DENOMINATOR as u32
+        if new_rule.platform_fee_bps > BPS_DENOMINATOR || new_rule.network_fee_bps > BPS_DENOMINATOR
         {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
@@ -740,10 +737,9 @@ fn calculate_split(amount: i128, rule: &SettlementRule) -> FeeSplit {
     // Standard integer division (`/`) truncates fractions toward zero, causing precision loss and under-collecting fees.
     // To prevent fee under-collection, ceiling division is simulated by adding `BPS_DENOMINATOR - 1` to the numerator.
     // Edge case: For small amounts, ceil rounding can force fees to 1 unit even when the basis points represent a tiny fraction.
-    let platform_fee_amount =
-        (amount * (rule.platform_fee_bps as i128) + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
-    let network_fee_amount =
-        (amount * (rule.network_fee_bps as i128) + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
+    let denom = BPS_DENOMINATOR as i128;
+    let platform_fee_amount = (amount * (rule.platform_fee_bps as i128) + denom - 1) / denom;
+    let network_fee_amount = (amount * (rule.network_fee_bps as i128) + denom - 1) / denom;
 
     // The merchant amount is calculated as the subtraction remainder of the gross amount minus all rounded-up fees.
     // This ensures the sum of the split amounts (platform fee + network fee + merchant share) always equals the gross amount.
