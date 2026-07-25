@@ -526,10 +526,9 @@ impl SettlementContract {
     /// **Topics**: `(Symbol("payment_stored"), Address merchant)`
     /// **Data**: `(BytesN<32> reference, PaymentRecord record)`
     ///
-    /// ## Emitted Event: `payment_split`
-    ///
-    /// **Topics**: `(Symbol("payment_split"), Address merchant)`
-    /// **Data**: `(i128 gross, i128 platform_fee, i128 network_fee, i128 merchant_amount)`
+    /// The fee split (platform fee, network fee, merchant amount, gross amount)
+    /// is available on the `PaymentRecord` in this event's data; no separate
+    /// split event is emitted.
     pub fn store_payment_reference(
         env: Env,
         merchant: Address,
@@ -577,18 +576,8 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "payment_stored"), merchant.clone()),
+            (Symbol::new(&env, "payment_stored"), merchant),
             (reference.clone(), record),
-        );
-
-        env.events().publish(
-            (Symbol::new(&env, "payment_split"), merchant),
-            (
-                split.gross_amount,
-                split.platform_fee_amount,
-                split.network_fee_amount,
-                split.merchant_amount,
-            ),
         );
 
         split
@@ -1900,11 +1889,11 @@ mod tests {
         let events = env.events().all();
         assert_eq!(
             events.len(),
-            before + 2,
-            "exactly two events should be emitted by store_payment_reference"
+            before + 1,
+            "exactly one event should be emitted by store_payment_reference"
         );
 
-        // Event 1: payment_stored
+        // payment_stored carries the full fee split via the embedded PaymentRecord.
         let event1 = events.get(before).unwrap();
         let (_contract_id, topics1, data1) = event1;
         assert_eq!(topics1.len(), 2);
@@ -1923,23 +1912,6 @@ mod tests {
         assert_eq!(record.merchant_amount, 19_400);
         assert_eq!(record.platform_fee_bps, 250);
         assert_eq!(record.network_fee_bps, 50);
-
-        // Event 2: payment_split
-        let event2 = events.get(before + 1).unwrap();
-        let (_contract_id, topics2, data2) = event2;
-        assert_eq!(topics2.len(), 2);
-        assert_eq!(
-            Symbol::from_val(&env, &topics2.get(0).unwrap()),
-            Symbol::new(&env, "payment_split")
-        );
-        assert_eq!(Address::from_val(&env, &topics2.get(1).unwrap()), merchant);
-
-        let (gross, platform, network, merch): (i128, i128, i128, i128) =
-            FromVal::from_val(&env, &data2);
-        assert_eq!(gross, 20_000);
-        assert_eq!(platform, 500);
-        assert_eq!(network, 100);
-        assert_eq!(merch, 19_400);
     }
 
     #[test]
@@ -2037,9 +2009,10 @@ mod tests {
         client.register_merchant(&merchant);
     }
 
-    // Issue #90: verify split events are emitted correctly
+    // Issue #90 / #271: verify the fee split is available via payment_stored,
+    // without a redundant payment_split event.
     #[test]
-    fn split_events_emitted_on_payment_reference() {
+    fn split_data_available_on_payment_stored() {
         let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
         let rule = SettlementRule {
@@ -2053,16 +2026,23 @@ mod tests {
         let before = env.events().all().len();
         client.store_payment_reference(&merchant, &reference, &10_000);
         let events = env.events().all();
-        assert!(events.len() >= before + 2);
-        let found_split = events
-            .iter()
-            .skip(before as usize)
-            .any(|(_id, topics, _data)| {
-                !topics.is_empty()
-                    && Symbol::from_val(&env, &topics.get(0).unwrap())
-                        == Symbol::new(&env, "payment_split")
-            });
-        assert!(found_split, "payment_split event not emitted");
+        assert_eq!(
+            events.len(),
+            before + 1,
+            "only payment_stored should be emitted"
+        );
+
+        let (_contract_id, topics, data) = events.get(before).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "payment_stored")
+        );
+
+        let (_reference, record): (BytesN<32>, PaymentRecord) = FromVal::from_val(&env, &data);
+        assert_eq!(record.amount, 10_000);
+        assert_eq!(record.platform_fee_amount, 200);
+        assert_eq!(record.network_fee_amount, 50);
+        assert_eq!(record.merchant_amount, 9_750);
     }
 
     // Issue #85: verify default fee split falls back to 100 BPS

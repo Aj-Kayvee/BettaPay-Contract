@@ -24,9 +24,9 @@
 //! ### Pause / Unpause
 //! The admin can halt all mutating governance operations by calling
 //! [`GovernanceContract::pause`]. This sets a boolean flag in instance storage
-//! and emits a `pause` event. All entry-points that write state call the
+//! and emits a `paused` event. All entry-points that write state call the
 //! internal `assert_not_paused` guard. The contract is re-enabled with
-//! [`GovernanceContract::unpause`], which emits an `unpause` event.
+//! [`GovernanceContract::unpause`], which emits an `unpaused` event.
 //!
 //! ### Fee Configuration
 //! [`GovernanceContract::set_fee_config`] stores a [`FeeConfig`] struct that
@@ -78,8 +78,8 @@
 //! |---|---|
 //! | `contract_upgraded` | Wasm upgrade succeeded |
 //! | `admin` | Admin transfer completed |
-//! | `pause` | Contract paused |
-//! | `unpause` | Contract unpaused |
+//! | `paused` | Contract paused |
+//! | `unpaused` | Contract unpaused |
 //! | `sys_param` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
 //! | `anchor_upserted` | Anchor created or replaced for an asset |
@@ -88,8 +88,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    String, Symbol,
 };
 
 /// Minimum allowed fee in basis points (0.05%).
@@ -225,8 +225,8 @@ impl GovernanceContract {
     ///
     /// ### Events
     /// - Emits `contract_upgraded` with topic
-    ///   `(Symbol("contract_upgraded"), new_wasm_hash)` and data
-    ///   `(caller)`.
+    ///   `(Symbol("contract_upgraded"), caller)` and data
+    ///   `(new_wasm_hash)`.
     ///
     /// ### Panics
     /// - If the caller is not the stored admin.
@@ -239,8 +239,8 @@ impl GovernanceContract {
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash),
-            caller,
+            (Symbol::new(&env, "contract_upgraded"), caller),
+            new_wasm_hash,
         );
     }
 
@@ -310,7 +310,7 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Sets `DataKey::Paused` to `true` in instance storage and emits a `pause` event.
+    /// Sets `DataKey::Paused` to `true` in instance storage and emits a `paused` event.
     ///
     /// # Errors
     ///
@@ -323,7 +323,7 @@ impl GovernanceContract {
         caller.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
-            .publish((symbol_short!("pause"),), (admin, true));
+            .publish((Symbol::new(&env, "paused"),), (admin, true));
     }
 
     /// Resumes normal contract operation after a pause.
@@ -341,7 +341,7 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Sets `DataKey::Paused` to `false` in instance storage and emits an `unpause` event.
+    /// Sets `DataKey::Paused` to `false` in instance storage and emits an `unpaused` event.
     ///
     /// # Errors
     ///
@@ -354,7 +354,7 @@ impl GovernanceContract {
         caller.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
-            .publish((symbol_short!("unpause"),), (admin, false));
+            .publish((Symbol::new(&env, "unpaused"),), (admin, false));
     }
 
     /// Returns whether the contract is currently paused.
@@ -588,8 +588,8 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Removes `DataKey::Anchor(asset)` from persistent storage and emits both an
-    /// `anchor_rm` and an `anchor_removed` event.
+    /// Removes `DataKey::Anchor(asset)` from persistent storage and emits an
+    /// `anchor_removed` event.
     ///
     /// # Errors
     ///
@@ -609,10 +609,6 @@ impl GovernanceContract {
         }
 
         env.storage().persistent().remove(&key);
-        // Ensure the instance cache is also cleared for this key
-        // Emit events indicating removal
-        env.events()
-            .publish((symbol_short!("anchor_rm"),), (asset.clone(),));
         env.events()
             .publish((Symbol::new(&env, "anchor_removed"), asset), ());
     }
