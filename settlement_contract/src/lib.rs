@@ -253,6 +253,7 @@ impl SettlementContract {
     /// - `caller`: the admin who authorized the removal
     /// - `removed`: the rule values that were removed from storage
     pub fn clear_settlement_rule(env: Env, merchant: Address) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
 
