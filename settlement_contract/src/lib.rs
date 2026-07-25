@@ -142,6 +142,7 @@ pub struct PaymentRecord {
 #[contracttype]
 enum DataKey {
     Admin,
+    PendingAdmin,
     Merchant(Address),
     Rule(Address),
     DefaultRule,
@@ -229,7 +230,93 @@ impl SettlementContract {
         read_admin(&env)
     }
 
-    /// Transfer the admin role to a new address.
+    /// Returns the currently proposed pending admin address, if any.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Propose a new admin address for a two-step admin transfer.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`InvalidAddress`](SettlementError::InvalidAddress) — if `new_admin` is the zero address or empty string.
+    /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
+    ///
+    /// ## Emitted Event: `admin_proposed`
+    ///
+    /// **Topics**: `(Symbol("admin_proposed"),)`
+    /// **Data**: `(Address current_admin, Address new_admin)`
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+
+        let zero_address_str = soroban_sdk::String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        if new_admin.to_string().is_empty() || new_admin.to_string() == zero_address_str {
+            panic_with_error!(&env, SettlementError::InvalidAddress);
+        }
+
+        if new_admin == admin {
+            panic_with_error!(&env, SettlementError::InvalidAdmin);
+        }
+
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposed"),),
+            (admin, new_admin),
+        );
+    }
+
+    /// Accept the pending admin role proposal. Must be called by the pending admin.
+    ///
+    /// # Panics
+    ///
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if no pending admin proposal exists or caller is not pending admin.
+    ///
+    /// ## Emitted Event: `admin`
+    ///
+    /// **Topics**: `(Symbol("admin"),)`
+    /// **Data**: `Address new_admin`
+    pub fn accept_admin(env: Env) {
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, SettlementError::Unauthorized));
+
+        pending_admin.require_auth();
+
+        env.storage().instance().set(&DataKey::Admin, &pending_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+
+        env.events().publish((symbol_short!("admin"),), pending_admin);
+    }
+
+    /// Cancel an active pending admin transfer proposal.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    ///
+    /// ## Emitted Event: `admin_proposal_canceled`
+    ///
+    /// **Topics**: `(Symbol("admin_proposal_canceled"),)`
+    /// **Data**: `Address admin`
+    pub fn cancel_admin_transfer(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposal_canceled"),),
+            admin,
+        );
+    }
+
+    /// Transfer the admin role to a new address directly.
     ///
     /// # Panics
     ///
@@ -257,6 +344,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
@@ -844,6 +932,35 @@ mod tests {
         let (env, client, admin, _) = setup();
         client.init(&admin);
         let _ = env;
+    }
+
+    #[test]
+    fn proposes_and_accepts_admin_successfully() {
+        let (env, client, admin, _) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_pending_admin(), None);
+
+        client.propose_admin(&new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        assert_eq!(client.get_admin(), admin);
+
+        client.accept_admin();
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
+    fn cancels_admin_proposal() {
+        let (env, client, admin, _) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+        client.cancel_admin_transfer();
+        assert_eq!(client.get_pending_admin(), None);
+        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]

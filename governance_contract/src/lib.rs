@@ -137,6 +137,8 @@ pub struct AdminTransferred {
 enum DataKey {
     /// Storage key for the contract admin address in instance storage.
     Admin,
+    /// Storage key for the pending contract admin proposal in instance storage.
+    PendingAdmin,
     /// Storage key for a system parameter value indexed by a symbol in persistent storage.
     SystemParam(Symbol),
     /// Storage key for the fee configuration data in persistent storage.
@@ -260,7 +262,89 @@ impl GovernanceContract {
         );
     }
 
-    /// Transfers administrative control of the contract to a new address.
+    /// Returns the currently proposed pending admin address, if any.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Propose a new admin address for a two-step admin transfer.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the current admin.
+    /// Panics with `GovernanceError::InvalidAdmin` if `new_admin` is zero address or identical to current admin.
+    pub fn propose_admin(env: Env, caller: Address, new_admin: Address) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let zero_address = String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        if new_admin.to_string() == zero_address || admin == new_admin {
+            panic_with_error!(&env, GovernanceError::InvalidAdmin);
+        }
+
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposed"),),
+            (admin, new_admin),
+        );
+    }
+
+    /// Accept the pending admin role proposal. Must be called by the pending admin.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::Unauthorized` if no proposal exists or `caller` is not pending admin.
+    pub fn accept_admin(env: Env, caller: Address) {
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, GovernanceError::Unauthorized));
+
+        if caller != pending_admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let old_admin = read_admin(&env);
+        env.storage().instance().set(&DataKey::Admin, &pending_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin,
+                new_admin: pending_admin,
+            },
+        );
+    }
+
+    /// Cancel an active pending admin transfer proposal.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the current admin.
+    pub fn cancel_admin_transfer(env: Env, caller: Address) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposal_canceled"),),
+            admin,
+        );
+    }
+
+    /// Transfers administrative control of the contract to a new address directly.
     ///
     /// The current administrator must authorise the call. The new admin may not be
     /// the zero address or the same address as the current administrator.
@@ -301,6 +385,7 @@ impl GovernanceContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -988,6 +1073,35 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn proposes_and_accepts_admin_successfully_in_governance() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_pending_admin(), None);
+
+        client.propose_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        assert_eq!(client.get_admin(), admin);
+
+        client.accept_admin(&new_admin);
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
+    fn cancels_admin_proposal_in_governance() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin(), None);
+        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
