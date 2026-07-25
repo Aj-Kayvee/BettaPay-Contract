@@ -497,7 +497,8 @@ impl SettlementContract {
     }
 
     /// Returns the global default settlement rule, if one has been set.
-    /// Automatically extends the persistent storage TTL to prevent archival.
+    /// Automatically extends the persistent storage TTL to prevent archival
+    /// during public read queries (clausal to TTL eviction).
     pub fn get_default_rule(env: Env) -> Option<SettlementRule> {
         let key = DataKey::DefaultRule;
         match env.storage().persistent().get::<_, SettlementRule>(&key) {
