@@ -1685,6 +1685,168 @@ mod tests {
         assert!(!emitted.auto_settle);
     }
 
+    // Regression coverage for read_rule_or_default's single-`get()`-per-key lookup
+    // (see #264): each branch must resolve with exactly one storage read for the
+    // key it needs, without probing or extending the TTL of the other rule key.
+
+    #[test]
+    fn read_rule_or_default_short_circuits_on_merchant_rule_without_touching_default() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let default_rule = SettlementRule {
+            platform_fee_bps: 200,
+            network_fee_bps: 50,
+            settlement_delay_ledger: 10,
+            auto_settle: true,
+        };
+        client.set_default_rule(&default_rule);
+
+        let merchant_rule = SettlementRule {
+            platform_fee_bps: 300,
+            network_fee_bps: 75,
+            settlement_delay_ledger: 20,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &merchant_rule);
+
+        // Capture DefaultRule's absolute expiration ledger (sequence + remaining TTL)
+        // rather than the raw remaining-TTL count, since the count alone decays with
+        // every ledger that passes regardless of whether the entry was touched.
+        let default_expiration_before = env.as_contract(&client.address, || {
+            env.ledger().sequence() + env.storage().persistent().get_ttl(&DataKey::DefaultRule)
+        });
+
+        // Keep the contract instance itself alive across the large jump below —
+        // otherwise it would archive first and mask the assertions this test cares about.
+        env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .extend_ttl(RULE_TTL_THRESHOLD + 200_000, RULE_TTL_THRESHOLD + 1_000_000);
+        });
+
+        // Advance the ledger past RULE_TTL_THRESHOLD so the merchant rule's remaining
+        // TTL actually falls below the threshold and a real extend_ttl bump is
+        // triggered on read (also making a spurious bump on DefaultRule observable).
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + RULE_TTL_THRESHOLD + 50_000);
+
+        let resolved = env.as_contract(&client.address, || {
+            read_rule_or_default(&env, merchant.clone())
+        });
+        assert_eq!(resolved.platform_fee_bps, merchant_rule.platform_fee_bps);
+        assert_eq!(resolved.network_fee_bps, merchant_rule.network_fee_bps);
+        assert_eq!(
+            resolved.settlement_delay_ledger,
+            merchant_rule.settlement_delay_ledger
+        );
+        assert_eq!(resolved.auto_settle, merchant_rule.auto_settle);
+
+        env.as_contract(&client.address, || {
+            // get_ttl returns the remaining ledger count, not an absolute sequence
+            // number, so a freshly extended entry's TTL settles back at RULE_TTL_BUMP.
+            let merchant_ttl = env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::Rule(merchant.clone()));
+            assert!(
+                merchant_ttl >= RULE_TTL_BUMP,
+                "merchant rule TTL must be extended when the merchant rule is resolved"
+            );
+
+            // DefaultRule must be left completely untouched: its absolute expiration
+            // ledger is unchanged, proving it was never read once the merchant rule
+            // was found (an extend_ttl call would have pushed this number forward).
+            let default_expiration_after =
+                env.ledger().sequence() + env.storage().persistent().get_ttl(&DataKey::DefaultRule);
+            assert_eq!(
+                default_expiration_after, default_expiration_before,
+                "DefaultRule must not be read or have its TTL extended when a merchant rule exists"
+            );
+        });
+    }
+
+    #[test]
+    fn read_rule_or_default_falls_back_to_default_without_creating_merchant_entry() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let default_rule = SettlementRule {
+            platform_fee_bps: 150,
+            network_fee_bps: 25,
+            settlement_delay_ledger: 5,
+            auto_settle: true,
+        };
+        client.set_default_rule(&default_rule);
+
+        let resolved = env.as_contract(&client.address, || {
+            read_rule_or_default(&env, merchant.clone())
+        });
+        assert_eq!(resolved.platform_fee_bps, default_rule.platform_fee_bps);
+        assert_eq!(resolved.network_fee_bps, default_rule.network_fee_bps);
+        assert_eq!(
+            resolved.settlement_delay_ledger,
+            default_rule.settlement_delay_ledger
+        );
+        assert_eq!(resolved.auto_settle, default_rule.auto_settle);
+
+        env.as_contract(&client.address, || {
+            // No merchant-specific rule was ever written by the fallback lookup.
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&DataKey::Rule(merchant.clone())));
+
+            let default_ttl = env.storage().persistent().get_ttl(&DataKey::DefaultRule);
+            assert!(
+                default_ttl >= RULE_TTL_BUMP,
+                "DefaultRule TTL must be extended when it is the resolved rule"
+            );
+        });
+    }
+
+    #[test]
+    fn read_rule_or_default_bootstrap_path_reads_only_leaves_no_storage_footprint() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let before = env.events().all().len();
+        let resolved = env.as_contract(&client.address, || {
+            read_rule_or_default(&env, merchant.clone())
+        });
+
+        assert_eq!(
+            resolved.platform_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+        );
+        assert_eq!(
+            resolved.network_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+        );
+        assert_eq!(
+            resolved.settlement_delay_ledger,
+            BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
+        );
+        assert_eq!(resolved.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
+
+        // The worst case (neither key set) must remain read-only: no entry gets
+        // created for either key as a side effect of resolving the bootstrap rule.
+        env.as_contract(&client.address, || {
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&DataKey::Rule(merchant.clone())));
+            assert!(!env.storage().persistent().has(&DataKey::DefaultRule));
+        });
+
+        let events = env.events().all();
+        assert_eq!(
+            events.len(),
+            before + 1,
+            "exactly one bootstrap_fallback event expected"
+        );
+    }
+
     #[test]
     fn global_default_used_when_no_explicit_merchant_rule() {
         let (_env, client, _admin, merchant) = setup();
