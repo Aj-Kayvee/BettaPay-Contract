@@ -464,6 +464,9 @@ impl SettlementContract {
     /// - `caller`: the admin who authorized the change
     /// - `previous`: the previous global default rule (or bootstrap fallback if none was set)
     /// - `current`: the new global default rule
+    /// ## Event: `default_rule_updated`
+    ///
+    /// Emitted when the global default settlement rule is updated.
     pub fn set_default_rule(env: Env, new_rule: SettlementRule) {
         let admin = read_admin(&env);
         admin.require_auth();
