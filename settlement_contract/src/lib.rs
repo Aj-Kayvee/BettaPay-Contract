@@ -390,6 +390,7 @@ impl SettlementContract {
     /// - `previous`: the rule values before the update (or system defaults on first set)
     /// - `current`: the new rule values after the update
     pub fn set_settlement_rule(env: Env, merchant: Address, rule: SettlementRule) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
 
@@ -465,6 +466,7 @@ impl SettlementContract {
     /// - `previous`: the previous global default rule (or bootstrap fallback if none was set)
     /// - `current`: the new global default rule
     pub fn set_default_rule(env: Env, new_rule: SettlementRule) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         admin.require_auth();
 
@@ -2170,13 +2172,23 @@ mod tests {
     }
 
     #[test]
-    fn merchant_registration_and_rule_updates_succeed_when_paused() {
+    fn merchant_registration_succeeds_when_paused() {
         let (_env, client, _admin, merchant) = setup();
         client.pause();
         assert!(client.is_paused());
 
         client.register_merchant(&merchant);
         assert!(client.is_merchant_registered(&merchant));
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_settlement_rule_rejected_when_paused() {
+        let (_env, client, _admin, merchant) = setup();
+        client.pause();
+        assert!(client.is_paused());
+
+        client.register_merchant(&merchant);
 
         let rule = SettlementRule {
             platform_fee_bps: 250,
@@ -2185,12 +2197,6 @@ mod tests {
             auto_settle: true,
         };
         client.set_settlement_rule(&merchant, &rule);
-
-        let stored = client.get_settlement_rule(&merchant).expect("expected merchant rule");
-        assert_eq!(stored.platform_fee_bps, 250);
-        assert_eq!(stored.network_fee_bps, 50);
-        assert_eq!(stored.settlement_delay_ledger, 7);
-        assert!(stored.auto_settle);
     }
 
     // Issue #75: verify pause flag changes state in settlement contract
