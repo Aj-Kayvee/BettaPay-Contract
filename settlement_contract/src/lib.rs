@@ -332,11 +332,9 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        let zero_address_str = soroban_sdk::String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        );
-        if new_admin.to_string().is_empty() || new_admin.to_string() == zero_address_str {
+        let zero_addr: Address =
+            Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
+        if new_admin == zero_addr {
             panic_with_error!(&env, SettlementError::InvalidAddress);
         }
 
