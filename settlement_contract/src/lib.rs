@@ -439,6 +439,9 @@ impl SettlementContract {
 
     /// Remove a merchant from the registry and clear any associated settlement rule.
     ///
+    /// Note: If a settlement rule exists for this merchant, it is silently
+    /// removed without emitting a `settlement_rule_cleared` event.
+    ///
     /// # Panics
     ///
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
