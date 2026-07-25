@@ -433,9 +433,10 @@ impl SettlementContract {
     /// - First topic: fixed event-name symbol for filtering by event type
     /// - Second topic: the merchant address identifying which rule was cleared
     ///
-    /// **Data**: `(Address caller, SettlementRule removed)`
+    /// **Data**: `(Address caller, SettlementRule removed, SettlementRule fallback)`
     /// - `caller`: the admin who authorized the removal
     /// - `removed`: the rule values that were removed from storage
+    /// - `fallback`: the effective rule the merchant will use after clearing (global default or bootstrap)
     pub fn clear_settlement_rule(env: Env, merchant: Address) {
         let admin = read_admin(&env);
         admin.require_auth();
@@ -449,9 +450,11 @@ impl SettlementContract {
 
         env.storage().persistent().remove(&key);
 
+        let fallback = read_rule_or_default(&env, merchant.clone());
+
         env.events().publish(
             (Symbol::new(&env, "settlement_rule_cleared"), merchant),
-            (admin, removed),
+            (admin, removed, fallback),
         );
     }
 
@@ -1350,28 +1353,41 @@ mod tests {
         };
         client.set_settlement_rule(&merchant, &rule);
 
-        let prev_count = env.events().all().len();
         client.clear_settlement_rule(&merchant);
 
         // Storage key is gone: getter returns None
         assert!(client.get_settlement_rule(&merchant).is_none());
 
-        // Event check
+        // find the settlement_rule_cleared event and verify its data
         let events = env.events().all();
-        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
+        let cleared_event = events
+            .iter()
+            .rev()
+            .find(|(_id, topics, _data)| {
+                topics.len() >= 2
+                    && Symbol::from_val(&env, &topics.get(0).unwrap())
+                        == Symbol::new(&env, "settlement_rule_cleared")
+                    && Address::from_val(&env, &topics.get(1).unwrap()) == merchant
+            })
+            .expect("expected settlement_rule_cleared event");
+        let (_contract_id, _topics, data) = cleared_event;
 
-        let (_contract_id, topics, _data) = events.get(prev_count).unwrap();
-        assert_eq!(topics.len(), 2);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "settlement_rule_cleared")
-        );
-        assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), merchant);
+        let (admin_addr, removed, fallback): (Address, SettlementRule, SettlementRule) =
+            FromVal::from_val(&env, &data);
+        assert_eq!(admin_addr, _admin);
+        assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
+        assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
+        assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+        assert_eq!(removed.auto_settle, rule.auto_settle);
+        assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
+        assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
+        assert_eq!(fallback.settlement_delay_ledger, BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger);
+        assert_eq!(fallback.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
     }
 
     #[test]
     fn clearing_rule_falls_back_to_defaults() {
-        let (_env, client, _admin, merchant) = setup();
+        let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
 
         let rule = SettlementRule {
@@ -1382,7 +1398,6 @@ mod tests {
         };
         client.set_settlement_rule(&merchant, &rule);
 
-        // Clear the custom rule
         client.clear_settlement_rule(&merchant);
 
         // calculate_fee_split should now use default rates (100 bps platform, 0 bps network)
@@ -1390,6 +1405,31 @@ mod tests {
         assert_eq!(split.platform_fee_amount, 500); // 100 bps of 50_000
         assert_eq!(split.network_fee_amount, 0);
         assert_eq!(split.merchant_amount, 49_500);
+
+        // find the settlement_rule_cleared event and verify its data
+        let events = env.events().all();
+        let cleared_event = events
+            .iter()
+            .rev()
+            .find(|(_id, topics, _data)| {
+                topics.len() >= 2
+                    && Symbol::from_val(&env, &topics.get(0).unwrap())
+                        == Symbol::new(&env, "settlement_rule_cleared")
+                    && Address::from_val(&env, &topics.get(1).unwrap()) == merchant
+            })
+            .expect("expected settlement_rule_cleared event");
+        let (_contract_id, _topics, data) = cleared_event;
+
+        let (_caller, removed, fallback): (Address, SettlementRule, SettlementRule) =
+            FromVal::from_val(&env, &data);
+        assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
+        assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
+        assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+        assert_eq!(removed.auto_settle, rule.auto_settle);
+        assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
+        assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
+        assert_eq!(fallback.settlement_delay_ledger, BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger);
+        assert_eq!(fallback.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
     }
 
     #[test]
@@ -1615,7 +1655,7 @@ mod tests {
 
     #[test]
     fn clearing_rule_falls_back_to_global_default() {
-        let (_env, client, _admin, merchant) = setup();
+        let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
 
         let global_rule = SettlementRule {
@@ -1633,6 +1673,8 @@ mod tests {
             auto_settle: false,
         };
         client.set_settlement_rule(&merchant, &merchant_rule);
+
+        let prev_count = env.events().all().len();
         client.clear_settlement_rule(&merchant);
 
         // After clearing, should fall back to global default (200/50), not bootstrap (100/0)
@@ -1640,6 +1682,28 @@ mod tests {
         assert_eq!(split.platform_fee_amount, 1_000); // 200 bps
         assert_eq!(split.network_fee_amount, 250); // 50 bps
         assert_eq!(split.merchant_amount, 48_750);
+
+        // Event check: fallback should be the global default rule
+        let events = env.events().all();
+        assert_eq!(events.len(), prev_count + 1);
+        let (_contract_id, topics, data) = events.get(prev_count).unwrap();
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "settlement_rule_cleared")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), merchant);
+
+        let (_caller, removed, fallback): (Address, SettlementRule, SettlementRule) =
+            FromVal::from_val(&env, &data);
+        assert_eq!(removed.platform_fee_bps, merchant_rule.platform_fee_bps);
+        assert_eq!(removed.network_fee_bps, merchant_rule.network_fee_bps);
+        assert_eq!(removed.settlement_delay_ledger, merchant_rule.settlement_delay_ledger);
+        assert_eq!(removed.auto_settle, merchant_rule.auto_settle);
+        assert_eq!(fallback.platform_fee_bps, global_rule.platform_fee_bps);
+        assert_eq!(fallback.network_fee_bps, global_rule.network_fee_bps);
+        assert_eq!(fallback.settlement_delay_ledger, global_rule.settlement_delay_ledger);
+        assert_eq!(fallback.auto_settle, global_rule.auto_settle);
     }
 
     #[test]
