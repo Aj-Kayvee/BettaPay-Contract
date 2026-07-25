@@ -46,6 +46,8 @@ const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
 const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
 const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
 const RULE_TTL_BUMP: u32 = 17280 * 30;
+const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
+const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
 
 // Used until the admin sets a global default settlement rule.
 const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
@@ -431,6 +433,9 @@ impl SettlementContract {
         }
 
         env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
         env.events()
             .publish((Symbol::new(&env, "merchant_registered"), merchant), admin);
     }
@@ -773,7 +778,9 @@ fn is_merchant_registered_internal(env: &Env, merchant: Address) -> bool {
     let key = DataKey::Merchant(merchant);
     if env.storage().persistent().has(&key) {
         // Keep the merchant marker warm so active merchants do not expire early.
-        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
     }
     env.storage().persistent().get(&key).unwrap_or(false)
 }
