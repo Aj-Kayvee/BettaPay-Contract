@@ -605,12 +605,11 @@ impl SettlementContract {
         let key = DataKey::Rule(merchant);
 
         if let Some(rule) = env.storage().persistent().get(&key) {
-            // Extend the TTL.
-            // 100_000 ledgers is the threshold (extend if remaining TTL is below this).
-            // 518_400 ledgers is the target (extend to roughly 30 days).
+            // Extend the TTL using the same named constants as set_settlement_rule
+            // so the read and write paths never drift apart if the policy changes.
             env.storage()
                 .persistent()
-                .extend_ttl(&key, 100_000, 518_400);
+                .extend_ttl(&key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
 
             Some(rule)
         } else {
