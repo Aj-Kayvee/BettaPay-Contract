@@ -1437,6 +1437,65 @@ mod tests {
         assert_eq!(stored.amount, 100);
     }
 
+    // Issue #297: verify store_payment_reference succeeds when amount = MIN_PAYMENT_AMOUNT (100)
+    // combined with a platform_fee_bps of 10_000 (100%). The contract must accept the call since
+    // the amount meets the minimum threshold. With ceiling-based fee arithmetic, the platform fee
+    // consumes the entire gross amount (100 bps * 100 / 10_000 rounded up = 100), leaving the
+    // merchant with exactly 0. This documents the known edge case: at extreme fee rates and the
+    // minimum payment amount, the merchant payout is zero.
+    #[test]
+    fn store_payment_reference_min_amount_with_maximum_platform_fee_yields_zero_merchant_payout() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        // Set a rule with platform_fee_bps = 10_000 (100%) and no network fee.
+        let rule = SettlementRule {
+            platform_fee_bps: 10_000,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+
+        // Use a distinct reference (different from [100; 32] used in accepts_valid_minimum_amount).
+        let reference = BytesN::from_array(&env, &[101; 32]);
+
+        // store_payment_reference must succeed: amount = 100 satisfies the MIN_PAYMENT_AMOUNT check.
+        let split = client.store_payment_reference(&merchant, &reference, &100);
+
+        // With 100% platform fee and ceiling arithmetic:
+        //   platform_fee_amount = ceil(100 * 10_000 / 10_000) = 100
+        //   network_fee_amount  = 0
+        //   merchant_amount     = 100 - 100 - 0 = 0
+        assert_eq!(
+            split.gross_amount, 100,
+            "gross amount must equal the submitted payment amount"
+        );
+        assert_eq!(
+            split.platform_fee_amount, 100,
+            "platform fee must absorb the entire gross amount at 100% fee rate"
+        );
+        assert_eq!(
+            split.network_fee_amount, 0,
+            "network fee must be zero when network_fee_bps is 0"
+        );
+        assert_eq!(
+            split.merchant_amount, 0,
+            "merchant payout must be exactly 0 when fees consume the full gross amount"
+        );
+
+        // Confirm the stored record reflects the same computed values.
+        let stored = client
+            .get_payment_reference(&reference)
+            .expect("payment record must be present after successful store");
+        assert_eq!(stored.amount, 100);
+        assert_eq!(stored.platform_fee_amount, 100);
+        assert_eq!(stored.network_fee_amount, 0);
+        assert_eq!(stored.merchant_amount, 0);
+        assert_eq!(stored.platform_fee_bps, 10_000);
+        assert_eq!(stored.network_fee_bps, 0);
+    }
+
     #[test]
     #[should_panic]
     fn rejects_invalid_fee_bps() {
