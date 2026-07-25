@@ -98,6 +98,8 @@ const MIN_FEE_BPS: u32 = 5;
 const MAX_FEE_BPS: u32 = 5_000;
 const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
 const FEE_TTL_BUMP: u32 = 17280 * 30;
+const ADMIN_TTL_THRESHOLD: u32 = 50_000;
+const ADMIN_TTL_BUMP: u32 = 100_000;
 
 #[derive(Clone)]
 #[contracttype]
@@ -651,7 +653,9 @@ impl GovernanceContract {
 ///
 /// Panics if the contract has not been initialized yet.
 fn read_admin(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -697,7 +701,8 @@ mod anchor_removal_test;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::storage::Instance;
+    use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{vec, Bytes, FromVal};
 
     fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
@@ -966,6 +971,55 @@ mod tests {
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn get_admin_extends_instance_ttl_on_read() {
+        let (env, client, admin) = setup();
+
+        assert_eq!(client.get_admin(), admin);
+
+        env.as_contract(&client.address, || {
+            let ttl = env.storage().instance().get_ttl();
+            assert!(
+                ttl >= ADMIN_TTL_BUMP,
+                "instance TTL must be extended to ADMIN_TTL_BUMP after reading admin"
+            );
+        });
+    }
+
+    #[test]
+    fn get_admin_refreshes_instance_ttl_once_below_threshold() {
+        let (env, client, admin) = setup();
+
+        // First read establishes a full ADMIN_TTL_BUMP remaining TTL.
+        client.get_admin();
+
+        // Advance the ledger so the remaining TTL drops below ADMIN_TTL_THRESHOLD,
+        // which is required for extend_ttl to actually re-trigger on the next read.
+        env.ledger().set_sequence_number(
+            env.ledger().sequence() + (ADMIN_TTL_BUMP - ADMIN_TTL_THRESHOLD) + 1_000,
+        );
+
+        env.as_contract(&client.address, || {
+            let ttl_before_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_before_read < ADMIN_TTL_THRESHOLD,
+                "test setup must actually cross the extension threshold"
+            );
+        });
+
+        assert_eq!(client.get_admin(), admin);
+
+        // get_ttl() reports the remaining ledger count, not an absolute sequence
+        // number, so a freshly re-extended entry settles back at ADMIN_TTL_BUMP.
+        env.as_contract(&client.address, || {
+            let ttl_after_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_after_read >= ADMIN_TTL_BUMP,
+                "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
+            );
+        });
     }
 
     #[test]

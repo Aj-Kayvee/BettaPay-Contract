@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{Env, vec};
+    use crate::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Env;
 
     fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
         let env = Env::default();
