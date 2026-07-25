@@ -525,8 +525,8 @@ impl SettlementContract {
     ///
     /// ## Emitted Event: `payment_stored`
     ///
-    /// **Topics**: `(Symbol("payment_stored"), Address merchant)`
-    /// **Data**: `(BytesN<32> reference, PaymentRecord record)`
+    /// **Topics**: `(Symbol("payment_stored"), Address merchant, BytesN<32> reference)`
+    /// **Data**: `()`
     ///
     /// ## Emitted Event: `payment_split`
     ///
@@ -579,8 +579,8 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "payment_stored"), merchant.clone()),
-            (reference.clone(), record),
+            (Symbol::new(&env, "payment_stored"), merchant.clone(), reference.clone()),
+            (),
         );
 
         env.events().publish(
@@ -1908,23 +1908,16 @@ mod tests {
 
         // Event 1: payment_stored
         let event1 = events.get(before).unwrap();
-        let (_contract_id, topics1, data1) = event1;
-        assert_eq!(topics1.len(), 2);
+        let (_contract_id, topics1, _data1) = event1;
+        assert_eq!(topics1.len(), 3);
         assert_eq!(
             Symbol::from_val(&env, &topics1.get(0).unwrap()),
             Symbol::new(&env, "payment_stored")
         );
         assert_eq!(Address::from_val(&env, &topics1.get(1).unwrap()), merchant);
 
-        let (ref1, record): (BytesN<32>, PaymentRecord) = FromVal::from_val(&env, &data1);
+        let ref1: BytesN<32> = FromVal::from_val(&env, &topics1.get(2).unwrap());
         assert_eq!(ref1, reference);
-        assert_eq!(record.merchant, merchant);
-        assert_eq!(record.amount, 20_000);
-        assert_eq!(record.platform_fee_amount, 500);
-        assert_eq!(record.network_fee_amount, 100);
-        assert_eq!(record.merchant_amount, 19_400);
-        assert_eq!(record.platform_fee_bps, 250);
-        assert_eq!(record.network_fee_bps, 50);
 
         // Event 2: payment_split
         let event2 = events.get(before + 1).unwrap();
