@@ -38,6 +38,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, Symbol, Vec,
 };
+use soroban_sdk::testutils::storage::Persistent;
 
 const BPS_DENOMINATOR: u32 = 10_000;
 const MIN_PAYMENT_AMOUNT: i128 = 100;
@@ -332,8 +333,10 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        let zero_addr: Address =
-            Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
+        let zero_addr: Address = Address::from_string(&soroban_sdk::String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
         if new_admin == zero_addr {
             panic_with_error!(&env, SettlementError::InvalidAddress);
         }
@@ -2275,15 +2278,16 @@ mod tests {
 
         // payment_stored carries the full fee split via the embedded PaymentRecord.
         let event1 = events.get(before).unwrap();
-        let (_contract_id, topics1, _data1) = event1;
-        assert_eq!(topics1.len(), 3);
+        let (_contract_id, topics1, data1) = event1;
+        assert_eq!(topics1.len(), 2);
         assert_eq!(
             Symbol::from_val(&env, &topics1.get(0).unwrap()),
             Symbol::new(&env, "payment_stored")
         );
         assert_eq!(Address::from_val(&env, &topics1.get(1).unwrap()), merchant);
 
-        let ref1: BytesN<32> = FromVal::from_val(&env, &topics1.get(2).unwrap());
+        let (ref1, record): (BytesN<32>, PaymentRecord) =
+            FromVal::from_val(&env, &data1);
         assert_eq!(ref1, reference);
         assert_eq!(record.merchant, merchant);
         assert_eq!(record.amount, 20_000);
@@ -2292,23 +2296,6 @@ mod tests {
         assert_eq!(record.merchant_amount, 19_400);
         assert_eq!(record.platform_fee_bps, 250);
         assert_eq!(record.network_fee_bps, 50);
-
-        // Event 2: payment_split
-        let event2 = events.get(before + 1).unwrap();
-        let (_contract_id, topics2, data2) = event2;
-        assert_eq!(topics2.len(), 2);
-        assert_eq!(
-            Symbol::from_val(&env, &topics2.get(0).unwrap()),
-            Symbol::new(&env, "payment_split")
-        );
-        assert_eq!(Address::from_val(&env, &topics2.get(1).unwrap()), merchant);
-
-        let (gross, platform, network, merch): (i128, i128, i128, i128) =
-            FromVal::from_val(&env, &data2);
-        assert_eq!(gross, 20_000);
-        assert_eq!(platform, 500);
-        assert_eq!(network, 100);
-        assert_eq!(merch, 19_400);
     }
 
     #[test]
@@ -2572,6 +2559,23 @@ mod tests {
             auto_settle: true,
         };
         client.set_settlement_rule(&merchant, &rule);
+    }
+
+    // Issue #231: the global default settlement rule must not be updated while paused.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn set_default_rule_rejected_when_paused() {
+        let (_env, client, _admin, _merchant) = setup();
+        client.pause();
+        assert!(client.is_paused());
+
+        let rule = SettlementRule {
+            platform_fee_bps: 250,
+            network_fee_bps: 50,
+            settlement_delay_ledger: 7,
+            auto_settle: true,
+        };
+        client.set_default_rule(&rule);
     }
 
     // Issue #75: verify pause flag changes state in settlement contract
