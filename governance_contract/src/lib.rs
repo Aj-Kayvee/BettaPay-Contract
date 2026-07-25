@@ -82,7 +82,7 @@
 //! | `unpause` | Contract unpaused |
 //! | `sys_param` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
-//! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
+//! | `anchor_upserted` | Anchor created or replaced for an asset |
 //! | `anchor_removed` | Anchor removed for an asset |
 
 #![no_std]
@@ -552,10 +552,6 @@ impl GovernanceContract {
     /// Writes the anchor address to persistent storage under `DataKey::Anchor(asset)`
     /// and emits an `anchor_upserted` event.
     ///
-    /// **Data**: `(Option<Address> previous, Address current)`
-    /// - `previous`: the previous anchor address if one existed, or `None` for new assets
-    /// - `current`: the new anchor address being set
-    ///
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
@@ -568,11 +564,10 @@ impl GovernanceContract {
         }
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
-        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), (old_anchor, anchor));
+            .publish((Symbol::new(&env, "anchor_upserted"), asset), anchor);
     }
 
     /// Removes the anchor configuration for the given asset.
