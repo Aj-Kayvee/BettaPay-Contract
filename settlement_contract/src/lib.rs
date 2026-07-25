@@ -248,7 +248,10 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
         env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish((symbol_short!("admin"),), new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            new_admin,
+        );
     }
 
     /// Upgrades the underlying Wasm bytecode implementation of the contract under strict admin authority.
@@ -2337,7 +2340,7 @@ mod tests {
         assert_eq!(topics.len(), 1);
         assert_eq!(
             Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "admin")
+            Symbol::new(&env, "admin_transferred")
         );
         assert_eq!(Address::from_val(&env, &data), new_admin);
     }
