@@ -82,7 +82,7 @@
 //! | `unpause` | Contract unpaused |
 //! | `sys_param` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
-//! | `anchor_upserted` | Anchor created or replaced for an asset |
+//! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
 //! | `anchor_removed` | Anchor removed for an asset |
 
 #![no_std]
@@ -100,6 +100,22 @@ const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
 const FEE_TTL_BUMP: u32 = 17280 * 30;
 const ADMIN_TTL_THRESHOLD: u32 = 50_000;
 const ADMIN_TTL_BUMP: u32 = 100_000;
+
+// TTL policy for system parameters and anchors.
+//
+// These entries use a shorter, cheaper TTL window than the fee config
+// (`FEE_TTL_THRESHOLD` / `FEE_TTL_BUMP`, ~14/30 days at ~17280 ledgers/day).
+// The fee config is on the hot path of every settlement and must stay alive
+// for a long time to avoid archival-induced failures, so it is bumped to a
+// full ~30-day horizon. System parameters and anchors are read far less
+// frequently and are re-bumped on every access, so a smaller window keeps
+// rent costs down while still refreshing liveness on each read/write. The
+// values are intentionally kept separate per key so the policy for one can be
+// tuned without affecting the others.
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 50_000;
+const SYSTEM_PARAM_TTL_BUMP: u32 = 100_000;
+const ANCHOR_TTL_THRESHOLD: u32 = 50_000;
+const ANCHOR_TTL_BUMP: u32 = 100_000;
 
 #[derive(Clone)]
 #[contracttype]
@@ -123,6 +139,8 @@ pub struct AdminTransferred {
 enum DataKey {
     /// Storage key for the contract admin address in instance storage.
     Admin,
+    /// Storage key for the pending contract admin proposal in instance storage.
+    PendingAdmin,
     /// Storage key for a system parameter value indexed by a symbol in persistent storage.
     SystemParam(Symbol),
     /// Storage key for the fee configuration data in persistent storage.
@@ -180,12 +198,21 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::AlreadyInitialized` if already initialised.
+    ///
+    /// ## Emitted Event: `initialized`
+    ///
+    /// **Topics**: `(Symbol("initialized"),)`
+    /// **Data**: `Address admin`
     pub fn init(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, GovernanceError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.events().publish(
+            (Symbol::new(&env, "initialized"),),
+            admin,
+        );
     }
 
     /// Returns whether the contract has been initialised.
@@ -246,7 +273,89 @@ impl GovernanceContract {
         );
     }
 
-    /// Transfers administrative control of the contract to a new address.
+    /// Returns the currently proposed pending admin address, if any.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Propose a new admin address for a two-step admin transfer.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the current admin.
+    /// Panics with `GovernanceError::InvalidAdmin` if `new_admin` is zero address or identical to current admin.
+    pub fn propose_admin(env: Env, caller: Address, new_admin: Address) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let zero_address = String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        if new_admin.to_string() == zero_address || admin == new_admin {
+            panic_with_error!(&env, GovernanceError::InvalidAdmin);
+        }
+
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposed"),),
+            (admin, new_admin),
+        );
+    }
+
+    /// Accept the pending admin role proposal. Must be called by the pending admin.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::Unauthorized` if no proposal exists or `caller` is not pending admin.
+    pub fn accept_admin(env: Env, caller: Address) {
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, GovernanceError::Unauthorized));
+
+        if caller != pending_admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let old_admin = read_admin(&env);
+        env.storage().instance().set(&DataKey::Admin, &pending_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin,
+                new_admin: pending_admin,
+            },
+        );
+    }
+
+    /// Cancel an active pending admin transfer proposal.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the current admin.
+    pub fn cancel_admin_transfer(env: Env, caller: Address) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_proposal_canceled"),),
+            admin,
+        );
+    }
+
+    /// Transfers administrative control of the contract to a new address directly.
     ///
     /// The current administrator must authorise the call. The new admin may not be
     /// the zero address or the same address as the current administrator.
@@ -287,6 +396,7 @@ impl GovernanceContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -446,9 +556,11 @@ impl GovernanceContract {
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
         let storage_key = DataKey::SystemParam(key);
         if env.storage().persistent().has(&storage_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&storage_key, 50_000, 100_000);
+            env.storage().persistent().extend_ttl(
+                &storage_key,
+                SYSTEM_PARAM_TTL_THRESHOLD,
+                SYSTEM_PARAM_TTL_BUMP,
+            );
         }
         env.storage().persistent().get(&storage_key)
     }
@@ -554,6 +666,10 @@ impl GovernanceContract {
     /// Writes the anchor address to persistent storage under `DataKey::Anchor(asset)`
     /// and emits an `anchor_upserted` event.
     ///
+    /// **Data**: `(Option<Address> previous, Address current)`
+    /// - `previous`: the previous anchor address if one existed, or `None` for new assets
+    /// - `current`: the new anchor address being set
+    ///
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
@@ -566,10 +682,13 @@ impl GovernanceContract {
         }
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
-        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), anchor);
+            .publish((Symbol::new(&env, "anchor_upserted"), asset), (old_anchor, anchor));
     }
 
     /// Removes the anchor configuration for the given asset.
@@ -633,7 +752,9 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         let result = env.storage().persistent().get(&key);
         if result.is_some() {
-            env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         }
         result
     }
@@ -929,6 +1050,28 @@ mod tests {
     }
 
     #[test]
+    fn emits_event_on_initialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        client.init(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "exactly one event emitted on init");
+
+        let (_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "initialized")
+        );
+        assert_eq!(Address::from_val(&env, &data), admin);
+    }
+
+    #[test]
     #[should_panic]
     fn rejects_oversized_symbol_key() {
         let (env, client, _admin) = setup();
@@ -1020,6 +1163,32 @@ mod tests {
                 "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
             );
         });
+    fn proposes_and_accepts_admin_successfully_in_governance() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_pending_admin(), None);
+
+        client.propose_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+        assert_eq!(client.get_admin(), admin);
+
+        client.accept_admin(&new_admin);
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
+    fn cancels_admin_proposal_in_governance() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+        client.cancel_admin_transfer(&admin);
+        assert_eq!(client.get_pending_admin(), None);
+        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]

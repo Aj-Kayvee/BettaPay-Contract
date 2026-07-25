@@ -4,7 +4,7 @@
 mod tests {
     use crate::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Env;
+    use soroban_sdk::{Address, Env};
 
     fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
         let env = Env::default();
