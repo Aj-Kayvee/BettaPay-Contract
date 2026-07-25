@@ -358,28 +358,11 @@ impl SettlementContract {
             .persistent()
             .extend_ttl(&payment_key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
 
-        /// ## Emitted Event: `payment_stored`
-        ///
-        /// **Topics**: `(Symbol("payment_stored"), Address merchant)`
-        /// - First topic: fixed event-name symbol for filtering by event type
-        /// - Second topic: the merchant address that stored the payment
-        ///
-        /// **Data**: `(BytesN<32> reference, PaymentRecord record)`
-        /// - `reference`: the unique payment reference identifier
-        /// - `record`: the full payment record including amounts, fees, and settlement info
         env.events().publish(
             (Symbol::new(&env, "payment_stored"), merchant.clone()),
             (reference.clone(), record),
         );
 
-        /// ## Emitted Event: `payment_split`
-        ///
-        /// **Topics**: `(Symbol("payment_split"), Address merchant)`
-        /// - First topic: fixed event-name symbol for filtering by event type
-        /// - Second topic: the merchant address for which the split was calculated
-        ///
-        /// **Data**: `(i128 gross_amount, i128 platform_fee_amount, i128 network_fee_amount, i128 merchant_amount)`
-        /// - The calculated fee breakdown for the payment in absolute units
         env.events().publish(
             (Symbol::new(&env, "payment_split"), merchant),
             (
@@ -530,7 +513,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn rejects_double_initialization() {
-        let (env, client, admin) = setup();
+        let (env, client, admin, _merchant) = setup();
         client.init(&admin);
         let _ = env;
     }
@@ -1427,8 +1410,8 @@ mod tests {
         env.mock_auths(&[MockAuth {
             address: &non_admin,
             invoke: &MockAuthInvoke {
-                contract_id: &contract_id,
-                function_name: "set_settlement_rule",
+                contract: &contract_id,
+                fn_name: "set_settlement_rule",
                 args: (merchant.clone(), rule.clone()).into_val(&env),
                 sub_invokes: &[],
             },
