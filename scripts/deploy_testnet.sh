@@ -100,6 +100,10 @@ ADMIN_ADDRESS="$(soroban keys address "$BETTAPAY_IDENTITY")"
 assert_stellar_address "$ADMIN_ADDRESS" "Admin Address"
 log_info "Admin address: $ADMIN_ADDRESS"
 
+: "${RECOVERY_ADDRESS:=$ADMIN_ADDRESS}"
+assert_stellar_address "$RECOVERY_ADDRESS" "Recovery Address"
+log_info "Recovery address: $RECOVERY_ADDRESS"
+
 # Fund account via Friendbot
 log_info "Checking friendbot funding status..."
 curl --silent --fail --show-error "https://friendbot.stellar.org/?addr=${ADMIN_ADDRESS}" >/dev/null || log_warn "Friendbot funding request skipped or failed (account may already be funded)."
@@ -149,7 +153,7 @@ soroban contract invoke \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
   -- \
-  init --admin "$ADMIN_ADDRESS"
+  init --admin "$ADMIN_ADDRESS" --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
 log_success "Settlement contract initialized."
 
 # Initialize governance contract
@@ -160,7 +164,7 @@ soroban contract invoke \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
   -- \
-  init --admin "$ADMIN_ADDRESS"
+  init --admin "$ADMIN_ADDRESS" --recovery-address "$RECOVERY_ADDRESS"
 log_success "Governance contract initialized."
 
 # Print summary
@@ -169,6 +173,7 @@ echo -e "  ${GREEN}${BOLD}BettaPay Testnet Deployment Complete${NC}"
 echo -e "========================================================================"
 echo -e "  Identity:             ${BOLD}$BETTAPAY_IDENTITY${NC}"
 echo -e "  Admin address:        ${BOLD}$ADMIN_ADDRESS${NC}"
+echo -e "  Recovery address:     ${BOLD}$RECOVERY_ADDRESS${NC}"
 echo -e "  Settlement contract:  ${GREEN}${BOLD}$SETTLEMENT_ID${NC}"
 echo -e "  Governance contract:  ${GREEN}${BOLD}$GOVERNANCE_ID${NC}"
 echo -e "========================================================================"

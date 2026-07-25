@@ -98,6 +98,7 @@ const MIN_FEE_BPS: u32 = 5;
 const MAX_FEE_BPS: u32 = 5_000;
 const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
 const FEE_TTL_BUMP: u32 = 17280 * 30;
+const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone)]
 #[contracttype]
@@ -118,8 +119,17 @@ pub struct AdminTransferred {
 
 #[derive(Clone)]
 #[contracttype]
+pub struct PendingRecovery {
+    pub new_admin: Address,
+    pub execute_after: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
 enum DataKey {
     Admin,
+    RecoveryAddress,
+    PendingRecovery,
     SystemParam(Symbol),
     FeeConfig,
     Anchor(Address),
@@ -145,6 +155,9 @@ pub enum GovernanceError {
     /// The provided admin address is invalid (e.g., zero address or same as current admin).
     InvalidAdmin = 7,
     InvalidParamValue = 8,
+    InvalidRecoveryAddress = 9,
+    RecoveryNotPending = 10,
+    RecoveryDelayActive = 11,
 }
 
 #[contract]
@@ -173,12 +186,20 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::AlreadyInitialized` if already initialised.
-    pub fn init(env: Env, admin: Address) {
+    pub fn init(env: Env, admin: Address, recovery_address: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, GovernanceError::AlreadyInitialized);
         }
         admin.require_auth();
+        validate_nonzero_address(
+            &env,
+            &recovery_address,
+            GovernanceError::InvalidRecoveryAddress,
+        );
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryAddress, &recovery_address);
     }
 
     /// Returns whether the contract has been initialised.
@@ -211,6 +232,10 @@ impl GovernanceContract {
         read_admin(&env)
     }
 
+    pub fn get_recovery_address(env: Env) -> Address {
+        read_recovery_address(&env)
+    }
+
     /// Upgrades the contract Wasm code to a new version.
     ///
     /// This function replaces only the contract's executable Wasm code;
@@ -231,11 +256,60 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
+        let event_wasm_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash),
+            (Symbol::new(&env, "contract_upgraded"), event_wasm_hash),
             caller,
+        );
+    }
+
+    pub fn initiate_recovery(env: Env, new_admin: Address) {
+        let recovery_address = read_recovery_address(&env);
+        recovery_address.require_auth();
+        validate_nonzero_address(&env, &new_admin, GovernanceError::InvalidAdmin);
+
+        let pending = PendingRecovery {
+            new_admin: new_admin.clone(),
+            execute_after: env.ledger().timestamp() + RECOVERY_DELAY_SECONDS,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingRecovery, &pending);
+        env.events().publish(
+            (Symbol::new(&env, "recovery_initiated"),),
+            (recovery_address, new_admin, pending.execute_after),
+        );
+    }
+
+    pub fn cancel_recovery(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+            panic_with_error!(&env, GovernanceError::RecoveryNotPending);
+        }
+        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.events()
+            .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
+    }
+
+    pub fn execute_recovery(env: Env) {
+        let pending = read_pending_recovery(&env);
+        if env.ledger().timestamp() < pending.execute_after {
+            panic_with_error!(&env, GovernanceError::RecoveryDelayActive);
+        }
+
+        let old_admin = read_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &pending.new_admin);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.events().publish(
+            (Symbol::new(&env, "recovery_executed"),),
+            AdminTransferred {
+                old_admin,
+                new_admin: pending.new_admin,
+            },
         );
     }
 
@@ -267,13 +341,7 @@ impl GovernanceContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        let zero_address = String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        );
-        if new_admin.to_string() == zero_address {
-            panic_with_error!(&env, GovernanceError::InvalidAdmin);
-        }
+        validate_nonzero_address(&env, &new_admin, GovernanceError::InvalidAdmin);
 
         if admin == new_admin {
             panic_with_error!(&env, GovernanceError::InvalidAdmin);
@@ -548,12 +616,8 @@ impl GovernanceContract {
         }
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
-        env.storage()
-            .persistent()
-            .set(&key, &anchor.clone());
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, 50_000, 100_000);
+        env.storage().persistent().set(&key, &anchor.clone());
+        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events()
             .publish((Symbol::new(&env, "anchor_upserted"), asset), anchor);
     }
@@ -631,6 +695,31 @@ fn read_admin(env: &Env) -> Address {
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
 }
 
+fn read_recovery_address(env: &Env) -> Address {
+    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .get(&DataKey::RecoveryAddress)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
+}
+
+fn read_pending_recovery(env: &Env) -> PendingRecovery {
+    env.storage()
+        .instance()
+        .get(&DataKey::PendingRecovery)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::RecoveryNotPending))
+}
+
+fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError) {
+    let zero_address = String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    if address.to_string() == zero_address {
+        panic_with_error!(env, error);
+    }
+}
+
 fn is_paused(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -647,7 +736,7 @@ fn assert_not_paused(env: &Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{vec, Bytes, FromVal};
 
     fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
@@ -655,9 +744,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
-        client.init(&admin);
+        client.init(&admin, &recovery_address);
         (env, client, admin)
     }
 
@@ -665,13 +755,14 @@ mod tests {
     fn setup_no_mock() -> (Env, GovernanceContractClient<'static>, Address) {
         let env = Env::default();
         let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id: Address = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
         let invoke = MockAuthInvoke {
             contract: &contract_id,
             fn_name: "init",
-            args: vec![&env, admin.to_val()],
+            args: vec![&env, admin.to_val(), recovery_address.to_val()],
             sub_invokes: &[],
         };
         let auth = MockAuth {
@@ -679,16 +770,13 @@ mod tests {
             invoke: &invoke,
         };
         env.set_auths(&[(&auth).into()]);
-        client.init(&admin);
+        client.init(&admin, &recovery_address);
         (env, client, admin)
     }
 
     #[allow(dead_code)]
     fn upload_test_wasm(env: &Env) -> BytesN<32> {
-        let wasm = Bytes::from_slice(
-            env,
-            &[],
-        );
+        let wasm = Bytes::from_slice(env, &[]);
         env.deployer().upload_contract_wasm(wasm)
     }
 
@@ -853,11 +941,12 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
         assert!(!client.is_initialized());
-        client.init(&admin);
+        client.init(&admin, &recovery_address);
         assert!(client.is_initialized());
     }
 
@@ -903,6 +992,27 @@ mod tests {
         let (env, client, admin) = setup();
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn recovery_executes_after_delay() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        client.init(&admin, &recovery_address);
+        assert_eq!(client.get_recovery_address(), recovery_address);
+
+        client.initiate_recovery(&new_admin);
+        env.ledger()
+            .with_mut(|ledger| ledger.timestamp += RECOVERY_DELAY_SECONDS);
+        client.execute_recovery();
+
         assert_eq!(client.get_admin(), new_admin);
     }
 
@@ -986,7 +1096,7 @@ mod tests {
         assert_eq!(payload.old_admin, admin);
         assert_eq!(payload.new_admin, new_admin);
     }
-    
+
     #[test]
     fn admin_functions_work_while_paused() {
         let (env, client, admin) = setup();
@@ -1017,8 +1127,6 @@ mod tests {
         // Still paused throughout - none of the above silently unpaused it.
         assert!(client.is_paused());
     }
-
-
 
     #[test]
     #[should_panic]
@@ -1051,4 +1159,3 @@ mod tests {
         client.update_system_param(&non_admin, &key, &1440);
     }
 }
-

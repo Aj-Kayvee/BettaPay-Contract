@@ -100,6 +100,7 @@ GOVERNANCE_ID=$(soroban contract deploy \
 
 # 5. Initialize both contracts
 ADMIN=$(soroban keys address bettapay-admin)
+RECOVERY_ADDRESS="$ADMIN"
 
 soroban contract invoke \
   --id "$SETTLEMENT_ID" \
@@ -107,7 +108,7 @@ soroban contract invoke \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  init --admin "$ADMIN"
+  init --admin "$ADMIN" --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
 
 soroban contract invoke \
   --id "$GOVERNANCE_ID" \
@@ -115,7 +116,7 @@ soroban contract invoke \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  init --admin "$ADMIN"
+  init --admin "$ADMIN" --recovery-address "$RECOVERY_ADDRESS"
 ```
 
 ### Invoke Settlement Contract
@@ -421,8 +422,13 @@ pub struct PaymentRecord {
 
 | Function | Inputs | Output | Auth / Guard | Error Panics (`SettlementError`) | Description |
 |---|---|---|---|---|---|
-| `init` | `admin: Address` | `()` | `admin` | `AlreadyInitialized` | Initializes the contract and stores the administrator. Can only be called once. |
+| `init` | `admin: Address`, `governance: Address`, `recovery_address: Address` | `()` | `admin` | `AlreadyInitialized`, `InvalidGovernance`, `InvalidRecoveryAddress` | Initializes the contract and stores the administrator, governance contract, and backup recovery address. Can only be called once. |
 | `get_admin` | None | `Address` | None | `NotInitialized` | Returns the current admin address. |
+| `get_governance` | None | `Address` | None | `NotInitialized` | Returns the configured governance contract address. |
+| `update_governance` | `new_governance: Address` | `()` | Stored Admin, not paused | `NotInitialized`, `Paused`, `InvalidGovernance` | Updates the governance contract address after validating `get_fee_config`. |
+| `initiate_recovery` | `new_admin: Address` | `()` | Recovery Address | `NotInitialized`, `InvalidAdmin` | Starts delayed admin recovery. |
+| `cancel_recovery` | None | `()` | Stored Admin | `NotInitialized`, `RecoveryNotPending` | Cancels a pending recovery during the delay. |
+| `execute_recovery` | None | `()` | None | `RecoveryNotPending`, `RecoveryDelayActive` | Applies pending recovery after the 7-day delay. |
 | `transfer_admin` | `new_admin: Address` | `()` | Stored Admin | `NotInitialized`, `InvalidAddress`, `InvalidAdmin` | Transfers the administrative control to a new address. `new_admin` cannot be zero or the current admin. |
 | `pause` | None | `()` | Stored Admin | `NotInitialized`, `Unauthorized` | Halts mutating operations (e.g. register merchant, store payment reference). |
 | `unpause` | None | `()` | Stored Admin | `NotInitialized`, `Unauthorized` | Resumes mutating contract operations. |
@@ -470,9 +476,13 @@ pub struct AdminTransferred {
 
 | Function | Inputs | Output | Auth / Guard | Error Panics (`GovernanceError`) | Description |
 |---|---|---|---|---|---|
-| `init` | `admin: Address` | `()` | `admin` | `AlreadyInitialized` | Initializes the governance contract and sets the administrator. |
+| `init` | `admin: Address`, `recovery_address: Address` | `()` | `admin` | `AlreadyInitialized`, `InvalidRecoveryAddress` | Initializes the governance contract and stores the administrator and backup recovery address. |
 | `is_initialized` | None | `bool` | None | None | Returns `true` if initialization has been completed. |
 | `get_admin` | None | `Address` | None | `NotInitialized` | Returns the current admin address. |
+| `get_recovery_address` | None | `Address` | None | `NotInitialized` | Returns the configured backup recovery address. |
+| `initiate_recovery` | `new_admin: Address` | `()` | Recovery Address | `NotInitialized`, `InvalidAdmin` | Starts delayed admin recovery. |
+| `cancel_recovery` | None | `()` | Stored Admin | `NotInitialized`, `RecoveryNotPending` | Cancels a pending recovery during the delay. |
+| `execute_recovery` | None | `()` | None | `RecoveryNotPending`, `RecoveryDelayActive` | Applies pending recovery after the 7-day delay. |
 | `upgrade` | `caller: Address`, `new_wasm_hash: BytesN<32>` | `()` | `caller == admin` | `Unauthorized` | Replaces the contract Wasm code with a new binary, leaving storage unchanged. |
 | `transfer_admin` | `_caller: Address`, `new_admin: Address` | `()` | Stored Admin | `InvalidAdmin` | Assigns the admin role to `new_admin`. Address cannot be zero or the current admin. |
 | `pause` | `caller: Address` | `()` | `caller == admin` | `Unauthorized` | Halts mutating governance config operations. |
