@@ -99,6 +99,22 @@ const MAX_FEE_BPS: u32 = 5_000;
 const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
 const FEE_TTL_BUMP: u32 = 17280 * 30;
 
+// TTL policy for system parameters and anchors.
+//
+// These entries use a shorter, cheaper TTL window than the fee config
+// (`FEE_TTL_THRESHOLD` / `FEE_TTL_BUMP`, ~14/30 days at ~17280 ledgers/day).
+// The fee config is on the hot path of every settlement and must stay alive
+// for a long time to avoid archival-induced failures, so it is bumped to a
+// full ~30-day horizon. System parameters and anchors are read far less
+// frequently and are re-bumped on every access, so a smaller window keeps
+// rent costs down while still refreshing liveness on each read/write. The
+// values are intentionally kept separate per key so the policy for one can be
+// tuned without affecting the others.
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 50_000;
+const SYSTEM_PARAM_TTL_BUMP: u32 = 100_000;
+const ANCHOR_TTL_THRESHOLD: u32 = 50_000;
+const ANCHOR_TTL_BUMP: u32 = 100_000;
+
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeConfig {
@@ -444,9 +460,11 @@ impl GovernanceContract {
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
         let storage_key = DataKey::SystemParam(key);
         if env.storage().persistent().has(&storage_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&storage_key, 50_000, 100_000);
+            env.storage().persistent().extend_ttl(
+                &storage_key,
+                SYSTEM_PARAM_TTL_THRESHOLD,
+                SYSTEM_PARAM_TTL_BUMP,
+            );
         }
         env.storage().persistent().get(&storage_key)
     }
@@ -565,7 +583,9 @@ impl GovernanceContract {
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
         env.storage().persistent().set(&key, &anchor.clone());
-        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         env.events()
             .publish((Symbol::new(&env, "anchor_upserted"), asset), anchor);
     }
@@ -631,7 +651,9 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         let result = env.storage().persistent().get(&key);
         if result.is_some() {
-            env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         }
         result
     }
