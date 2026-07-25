@@ -203,12 +203,21 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
+    ///
+    /// ## Emitted Event: `initialized`
+    ///
+    /// **Topics**: `(Symbol("initialized"),)`
+    /// **Data**: `Address admin`
     pub fn init(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.events().publish(
+            (Symbol::new(&env, "initialized"),),
+            admin,
+        );
     }
 
     /// Return the current admin address.
@@ -803,6 +812,28 @@ mod tests {
         assert_eq!(
             BytesN::<32>::from_val(&env, &topics.get(1).unwrap()),
             new_wasm_hash
+        );
+        assert_eq!(Address::from_val(&env, &data), admin);
+    }
+
+    #[test]
+    fn emits_event_on_initialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+
+        client.init(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "exactly one event emitted on init");
+
+        let (_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "initialized")
         );
         assert_eq!(Address::from_val(&env, &data), admin);
     }
