@@ -640,9 +640,12 @@ impl SettlementContract {
         let key = DataKey::Payment(reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
         if record.is_some() {
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
+            let ttl = env.storage().persistent().get_ttl(&key);
+            if ttl < PAYMENT_TTL_THRESHOLD {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
+            }
         }
         record
     }
