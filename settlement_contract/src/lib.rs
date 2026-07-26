@@ -1160,6 +1160,50 @@ mod tests {
         });
     }
 
+    // Issue #252: the TTL must be refreshed on every write to the default rule,
+    // not just the first one — otherwise a rarely-updated (but frequently-read)
+    // default rule could still expire between updates.
+    #[test]
+    fn set_default_rule_extends_ttl_on_update() {
+        let (env, client, _admin, _merchant) = setup();
+
+        let first_rule = SettlementRule {
+            platform_fee_bps: 300,
+            network_fee_bps: 100,
+            settlement_delay_ledger: 5,
+            auto_settle: true,
+        };
+        client.set_default_rule(&first_rule);
+
+        // Advance the ledger past RULE_TTL_THRESHOLD so the remaining TTL from
+        // the first call drops below the threshold and a second write is
+        // actually required to bump it back up (extend_ttl is a no-op while
+        // the remaining TTL is still above the threshold). Advance in smaller
+        // hops, touching the contract via get_admin() between hops, so the
+        // instance's own (much shorter) TTL doesn't expire along the way.
+        for _ in 0..5 {
+            env.ledger().set_sequence_number(env.ledger().sequence() + 60_000);
+            client.get_admin();
+        }
+
+        let second_rule = SettlementRule {
+            platform_fee_bps: 400,
+            network_fee_bps: 150,
+            settlement_delay_ledger: 10,
+            auto_settle: false,
+        };
+        client.set_default_rule(&second_rule);
+
+        env.as_contract(&client.address, || {
+            let key = DataKey::DefaultRule;
+            let ttl = env.storage().persistent().get_ttl(&key);
+            assert!(
+                ttl >= RULE_TTL_BUMP,
+                "TTL must be refreshed to at least RULE_TTL_BUMP on every write, not just the first"
+            );
+        });
+    }
+
     #[test]
     fn store_payment_reference_extends_rule_ttl_on_read() {
         let (env, client, _admin, merchant) = setup();
