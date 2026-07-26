@@ -290,6 +290,9 @@ export SOROBAN_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 export SOROBAN_ACCOUNT="bettapay-admin"
 
 # Contract Addresses (update after deployment)
+# After deployment, update the contract IDs in:
+# - [BettaPay-Frontend](https://github.com/org/BettaPay-Frontend) `.env`
+# - [BettaPay-Backend](https://github.com/org/BettaPay-Backend) `.env`
 export SETTLEMENT_CONTRACT_ID="CBGBGKJSUY7XYB6HWW4CVAU6MW2KD25FSF45E5KCP53TKUK374MBZNFB"
 export GOVERNANCE_CONTRACT_ID="CDPFWUTIXF5BC6BKNDLSQOZSDQCXAJNZFCZWHBE2RRHANRN25T3ILPZ7"
 export ADMIN_ADDRESS="GCCHHKNI7GRA5QWC7RCTT3OHO7SKAUMKQA6IBWEQEO2SXI3GF376UHDD"
