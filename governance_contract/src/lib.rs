@@ -98,6 +98,12 @@ const MIN_FEE_BPS: u32 = 5;
 const MAX_FEE_BPS: u32 = 5_000;
 const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
 const FEE_TTL_BUMP: u32 = 17280 * 30;
+const ANCHOR_TTL_THRESHOLD: u32 = 17280 * 14;
+const ANCHOR_TTL_BUMP: u32 = 17280 * 30;
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
+const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
+const ADMIN_TTL_THRESHOLD: u32 = 17280 * 14;
+const ADMIN_TTL_BUMP: u32 = 17280 * 30;
 const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone)]
@@ -701,9 +707,12 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         let result = env.storage().persistent().get(&key);
         if result.is_some() {
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
+            let ttl = env.storage().persistent().get_ttl(&key);
+            if ttl < ANCHOR_TTL_THRESHOLD {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
+            }
         }
         result
     }
@@ -934,6 +943,85 @@ mod tests {
         client.upsert_anchor(&admin, &asset, &anchor);
         assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
         assert_eq!(client.get_anchor(&asset), Some(anchor));
+    }
+
+    /// Verifies that `get_anchor` extends the persistent TTL when the remaining
+    /// TTL has fallen below `ANCHOR_TTL_THRESHOLD`.
+    ///
+    /// After `upsert_anchor` the TTL is set to 100,000 ledgers — well below the
+    /// threshold of `ANCHOR_TTL_THRESHOLD` (17,280 × 14 = 241,920). A subsequent
+    /// `get_anchor` call must bump it up to at least `current_ledger + ANCHOR_TTL_BUMP`.
+    #[test]
+    fn get_anchor_extends_ttl_when_below_threshold() {
+        let (env, client, admin) = setup();
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+
+        client.upsert_anchor(&admin, &asset, &anchor);
+
+        // Advance ledger so the TTL from upsert (100,000) remains below threshold
+        // but the entry is still live.
+        env.ledger().set_sequence_number(1_000);
+
+        let result = client.get_anchor(&asset);
+        assert_eq!(result, Some(anchor));
+
+        // TTL should now be at least current_ledger + ANCHOR_TTL_BUMP
+        env.as_contract(&client.address, || {
+            let key = DataKey::Anchor(asset.clone());
+            let ttl = env.storage().persistent().get_ttl(&key);
+            assert!(
+                ttl >= env.ledger().sequence() + ANCHOR_TTL_BUMP,
+                "anchor TTL must be extended when below threshold: ttl={ttl}, need >= {}",
+                env.ledger().sequence() + ANCHOR_TTL_BUMP,
+            );
+        });
+    }
+
+    /// Verifies that `get_anchor` does NOT extend the persistent TTL when the
+    /// remaining TTL is still above `ANCHOR_TTL_THRESHOLD`.
+    ///
+    /// We manually set the anchor entry's TTL to a value well above the threshold
+    /// via `env.as_contract`, then call `get_anchor` and assert the TTL is
+    /// unchanged — confirming the conditional guard prevents unnecessary
+    /// `extend_ttl` calls on every read.
+    #[test]
+    fn get_anchor_does_not_extend_ttl_when_above_threshold() {
+        let (env, client, admin) = setup();
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+
+        client.upsert_anchor(&admin, &asset, &anchor);
+
+        // Manually extend the TTL to well above ANCHOR_TTL_THRESHOLD so the
+        // conditional guard in get_anchor should skip the extend_ttl call.
+        let high_ttl: u32 = ANCHOR_TTL_THRESHOLD + 100_000;
+        env.as_contract(&client.address, || {
+            let key = DataKey::Anchor(asset.clone());
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, high_ttl, high_ttl);
+        });
+
+        // Capture the TTL before calling get_anchor
+        let ttl_before = env.as_contract(&client.address, || {
+            let key = DataKey::Anchor(asset.clone());
+            env.storage().persistent().get_ttl(&key)
+        });
+
+        let result = client.get_anchor(&asset);
+        assert_eq!(result, Some(anchor));
+
+        // TTL must not have been bumped — it should remain the same as before
+        let ttl_after = env.as_contract(&client.address, || {
+            let key = DataKey::Anchor(asset.clone());
+            env.storage().persistent().get_ttl(&key)
+        });
+
+        assert_eq!(
+            ttl_before, ttl_after,
+            "get_anchor must NOT extend TTL when it is already above the threshold"
+        );
     }
 
     #[test]
