@@ -197,9 +197,8 @@ pub enum SettlementError {
     DuplicatePaymentReference = 8,
     /// The contract is paused. Most state‑mutating operations are blocked.
     Paused = 9,
-    /// `clear_settlement_rule` was called for a merchant that has no
-    /// merchant‑specific rule stored.
-    RuleNotSet = 10,
+    /// No merchant-specific rule has been set. The merchant will use the default rule or bootstrap fallback.
+    MerchantRuleNotSet = 10,
     /// The supplied address is the zero‑address or an empty string.
     /// Raised by `register_merchant` and `transfer_admin`.
     InvalidAddress = 11,
@@ -552,7 +551,7 @@ impl SettlementContract {
             .storage()
             .persistent()
             .get::<_, SettlementRule>(&key)
-            .unwrap_or_else(|| panic_with_error!(&env, SettlementError::RuleNotSet));
+            .unwrap_or_else(|| panic_with_error!(&env, SettlementError::MerchantRuleNotSet));
 
         env.storage().persistent().remove(&key);
 
