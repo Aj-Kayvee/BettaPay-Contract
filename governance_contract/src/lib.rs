@@ -209,10 +209,8 @@ impl GovernanceContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.events().publish(
-            (Symbol::new(&env, "initialized"),),
-            admin,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "initialized"),), admin);
     }
 
     /// Returns whether the contract has been initialised.
@@ -299,11 +297,11 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::InvalidAdmin);
         }
 
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
-        env.events().publish(
-            (Symbol::new(&env, "admin_proposed"),),
-            (admin, new_admin),
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((Symbol::new(&env, "admin_proposed"),), (admin, new_admin));
     }
 
     /// Accept the pending admin role proposal. Must be called by the pending admin.
@@ -324,7 +322,9 @@ impl GovernanceContract {
         caller.require_auth();
 
         let old_admin = read_admin(&env);
-        env.storage().instance().set(&DataKey::Admin, &pending_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &pending_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
 
         env.events().publish(
@@ -349,10 +349,8 @@ impl GovernanceContract {
         caller.require_auth();
 
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish(
-            (Symbol::new(&env, "admin_proposal_canceled"),),
-            admin,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "admin_proposal_canceled"),), admin);
     }
 
     /// Transfers administrative control of the contract to a new address directly.
@@ -687,8 +685,10 @@ impl GovernanceContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
-        env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), (old_anchor, anchor));
+        env.events().publish(
+            (Symbol::new(&env, "anchor_upserted"), asset),
+            (old_anchor, anchor),
+        );
     }
 
     /// Removes the anchor configuration for the given asset.
@@ -1159,6 +1159,9 @@ mod tests {
                 "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
             );
         });
+    }
+
+    #[test]
     fn proposes_and_accepts_admin_successfully_in_governance() {
         let (env, client, admin) = setup();
         let new_admin = Address::generate(&env);
