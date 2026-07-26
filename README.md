@@ -14,9 +14,10 @@ BettaPay-Contract/
 ├── governance_contract/        # Fee config, anchor registry, system params
 │   ├── Cargo.toml
 │   └── src/lib.rs
-└── scripts/
-    ├── deploy_testnet.sh       # Build + deploy both contracts + init admin
-    └── simulate.sh             # Simulate contract calls locally
+├── scripts/
+│   ├── deploy_testnet.sh       # Build + deploy both contracts + init admin
+│   └── simulate.sh             # Simulate contract calls locally
+└── DEVELOPMENT.md              # Upgrade and storage-migration guide
 ```
 
 ## Deployed Addresses (Testnet)
@@ -486,7 +487,7 @@ pub struct AdminTransferred {
 | `initiate_recovery` | `new_admin: Address` | `()` | Recovery Address | `NotInitialized`, `InvalidAdmin` | Starts delayed admin recovery. |
 | `cancel_recovery` | None | `()` | Stored Admin | `NotInitialized`, `RecoveryNotPending` | Cancels a pending recovery during the delay. |
 | `execute_recovery` | None | `()` | None | `RecoveryNotPending`, `RecoveryDelayActive` | Applies pending recovery after the 7-day delay. |
-| `upgrade` | `caller: Address`, `new_wasm_hash: BytesN<32>` | `()` | `caller == admin` | `Unauthorized` | Replaces the contract Wasm code with a new binary, leaving storage unchanged. |
+| `upgrade` | `caller: Address`, `new_wasm_hash: BytesN<32>` | `()` | `caller == admin` | `Unauthorized` | Replaces the contract Wasm code with a new binary, leaving storage unchanged. Changing a stored type needs a migration — see [DEVELOPMENT.md](DEVELOPMENT.md). |
 | `transfer_admin` | `_caller: Address`, `new_admin: Address` | `()` | Stored Admin | `InvalidAdmin` | Assigns the admin role to `new_admin`. Address cannot be zero or the current admin. |
 | `pause` | `caller: Address` | `()` | `caller == admin` | `Unauthorized` | Halts mutating governance config operations. |
 | `unpause` | `caller: Address` | `()` | `caller == admin` | `Unauthorized` | Resumes governance operations. |

@@ -8,6 +8,7 @@ Thank you for contributing to the BettaPay Soroban smart contracts. This guide c
 - [Workspace Configuration](#workspace-configuration)
 - [Getting Started](#getting-started)
 - [Development Workflow](#development-workflow)
+- [Upgrades and Storage Migrations](DEVELOPMENT.md)
 - [Testing](#testing)
 - [Building WASM Binaries](#building-wasm-binaries)
 - [Optional: Soroban CLI Scripts](#optional-soroban-cli-scripts)
