@@ -1810,6 +1810,29 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn clear_settlement_rule_fails_after_unregister_removes_rule() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 250,
+            network_fee_bps: 50,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        assert!(client.get_settlement_rule(&merchant).is_some());
+
+        // Unregister silently removes the merchant-specific rule.
+        client.unregister_merchant(&merchant);
+        assert!(client.get_settlement_rule(&merchant).is_none());
+
+        // The rule no longer exists, so clear_settlement_rule must panic with RuleNotSet.
+        client.clear_settlement_rule(&merchant);
+    }
+
+    #[test]
     fn bootstrap_default_used_before_any_default_rule_set() {
         let (_env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
