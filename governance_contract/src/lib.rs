@@ -521,6 +521,10 @@ impl GovernanceContract {
     /// Extends the persistent storage TTL for `DataKey::SystemParam(key)` when the
     /// entry is present.
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
+        if key.to_string().len() > 32 {
+            panic_with_error!(&env, GovernanceError::InvalidParamValue);
+        }
+
         let storage_key = DataKey::SystemParam(key);
         if env.storage().persistent().has(&storage_key) {
             env.storage().persistent().extend_ttl(
@@ -1221,6 +1225,14 @@ mod tests {
         let (env, client, admin) = setup();
         let long_key = Symbol::new(&env, "this_key_is_way_too_long_for_soroban");
         client.update_system_param(&admin, &long_key, &1440);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #8)")]
+    fn rejects_get_system_param_with_oversized_key() {
+        let (env, client, _admin) = setup();
+        let long_key = Symbol::new(&env, "this_key_is_way_too_long_for_soroban");
+        client.get_system_param(&long_key);
     }
 
     #[test]
