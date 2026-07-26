@@ -1435,6 +1435,17 @@ mod tests {
         assert_eq!(payments.len(), 0);
     }
 
+    // Issue #299: verify get_payments returns an empty vector when all requested references are missing from storage.
+    #[test]
+    fn get_payments_with_all_missing_references_returns_empty_vector() {
+        let (env, client, _admin, _merchant) = setup();
+        let missing_one = BytesN::from_array(&env, &[90; 32]);
+        let missing_two = BytesN::from_array(&env, &[91; 32]);
+        let references = Vec::from_array(&env, [missing_one, missing_two]);
+        let payments = client.get_payments(&references);
+        assert_eq!(payments.len(), 0);
+    }
+
     #[test]
     fn calculates_split_without_storing_reference() {
         let (_env, client, _admin, merchant) = setup();
