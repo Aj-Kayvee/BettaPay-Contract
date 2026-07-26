@@ -1426,6 +1426,15 @@ mod tests {
         assert_eq!(payments.get(1).unwrap().amount, 25_000);
     }
 
+    // Issue #298: verify get_payments returns an empty vector when given an empty input vector.
+    #[test]
+    fn get_payments_with_empty_input_vector_returns_empty_vector() {
+        let (env, client, _admin, _merchant) = setup();
+        let references = Vec::new(&env);
+        let payments = client.get_payments(&references);
+        assert_eq!(payments.len(), 0);
+    }
+
     #[test]
     fn calculates_split_without_storing_reference() {
         let (_env, client, _admin, merchant) = setup();
