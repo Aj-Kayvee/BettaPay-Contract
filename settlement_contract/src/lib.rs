@@ -197,9 +197,8 @@ pub enum SettlementError {
     DuplicatePaymentReference = 8,
     /// The contract is paused. Most state‑mutating operations are blocked.
     Paused = 9,
-    /// `clear_settlement_rule` was called for a merchant that has no
-    /// merchant‑specific rule stored.
-    RuleNotSet = 10,
+    /// No merchant-specific rule has been set. The merchant will use the default rule or bootstrap fallback.
+    MerchantRuleNotSet = 10,
     /// The supplied address is the zero‑address or an empty string.
     /// Raised by `register_merchant` and `transfer_admin`.
     InvalidAddress = 11,
@@ -552,7 +551,7 @@ impl SettlementContract {
             .storage()
             .persistent()
             .get::<_, SettlementRule>(&key)
-            .unwrap_or_else(|| panic_with_error!(&env, SettlementError::RuleNotSet));
+            .unwrap_or_else(|| panic_with_error!(&env, SettlementError::MerchantRuleNotSet));
 
         env.storage().persistent().remove(&key);
 
@@ -999,6 +998,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn get_admin_panics_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+        client.get_admin();
+    }
+
+    #[test]
     fn proposes_and_accepts_admin_successfully() {
         let (env, client, admin, _) = setup();
         let new_admin = Address::generate(&env);
@@ -1405,6 +1413,14 @@ mod tests {
     }
 
     #[test]
+    fn get_payment_reference_returns_none_for_unknown() {
+        let (env, client, _, _) = setup();
+        let unknown_ref = BytesN::from_array(&env, &[0xab; 32]);
+        let result = client.get_payment_reference(&unknown_ref);
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn gets_payments_in_batches() {
         let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
@@ -1437,6 +1453,39 @@ mod tests {
         let references = Vec::new(&env);
         let payments = client.get_payments(&references);
         assert_eq!(payments.len(), 0);
+    }
+
+    // Issue #299: verify get_payments returns an empty vector when all requested references are missing from storage.
+    #[test]
+    fn get_payments_with_all_missing_references_returns_empty_vector() {
+        let (env, client, _admin, _merchant) = setup();
+        let missing_one = BytesN::from_array(&env, &[90; 32]);
+        let missing_two = BytesN::from_array(&env, &[91; 32]);
+        let references = Vec::from_array(&env, [missing_one, missing_two]);
+        let payments = client.get_payments(&references);
+        assert_eq!(payments.len(), 0);
+    }
+
+    // Issue #300: verify get_payments correctly filters out missing references and returns records for valid ones.
+    #[test]
+    fn get_payments_with_mixed_valid_and_missing_references() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let valid_one = BytesN::from_array(&env, &[80; 32]);
+        let valid_two = BytesN::from_array(&env, &[81; 32]);
+        let missing_ref = BytesN::from_array(&env, &[82; 32]);
+
+        client.store_payment_reference(&merchant, &valid_one, &10_000);
+        client.store_payment_reference(&merchant, &valid_two, &20_000);
+
+        // Query with: [valid_one, missing_ref, valid_two]
+        let references = Vec::from_array(&env, [valid_one.clone(), missing_ref, valid_two.clone()]);
+        let payments = client.get_payments(&references);
+
+        assert_eq!(payments.len(), 2);
+        assert_eq!(payments.get(0).unwrap().amount, 10_000);
+        assert_eq!(payments.get(1).unwrap().amount, 20_000);
     }
 
     #[test]
@@ -1799,6 +1848,29 @@ mod tests {
     fn clear_settlement_rule_fails_when_not_set() {
         let (_env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
+        client.clear_settlement_rule(&merchant);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn clear_settlement_rule_fails_after_unregister_removes_rule() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 250,
+            network_fee_bps: 50,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        assert!(client.get_settlement_rule(&merchant).is_some());
+
+        // Unregister silently removes the merchant-specific rule.
+        client.unregister_merchant(&merchant);
+        assert!(client.get_settlement_rule(&merchant).is_none());
+
+        // The rule no longer exists, so clear_settlement_rule must panic with RuleNotSet.
         client.clear_settlement_rule(&merchant);
     }
 
