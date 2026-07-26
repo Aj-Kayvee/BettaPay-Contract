@@ -862,6 +862,39 @@ mod tests {
     }
 
     #[test]
+    fn executes_contract_wasm_upgrade_successfully() {
+        let (env, client, admin) = setup();
+        let new_wasm_hash = upload_test_wasm(&env);
+
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Ensure the upgraded contract remains callable and retains its state.
+        let upgraded_client = GovernanceContractClient::new(&env, &client.address);
+        assert_eq!(upgraded_client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1)")]
+    fn governance_rejects_double_initialization() {
+        let (env, client, _admin) = setup();
+        let other_admin = Address::generate(&env);
+
+        client.init(&other_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn governance_rejects_zero_address_admin_transfer() {
+        let (env, client, admin) = setup();
+        let zero_address = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+
+        client.transfer_admin(&admin, &zero_address);
+    }
+
+    #[test]
     fn updates_system_parameters() {
         let (env, client, admin) = setup();
         let key = Symbol::new(&env, "max_settle");
@@ -1159,6 +1192,9 @@ mod tests {
                 "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
             );
         });
+    }
+
+    #[test]
     fn proposes_and_accepts_admin_successfully_in_governance() {
         let (env, client, admin) = setup();
         let new_admin = Address::generate(&env);

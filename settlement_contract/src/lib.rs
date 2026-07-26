@@ -895,6 +895,10 @@ mod tests {
             new_wasm_hash
         );
         assert_eq!(Address::from_val(&env, &data), admin);
+
+        // Ensure the upgraded contract remains callable and retains its state.
+        let upgraded_client = SettlementContractClient::new(&env, &client.address);
+        assert_eq!(upgraded_client.get_admin(), admin);
     }
 
     #[test]
