@@ -24,9 +24,9 @@
 //! ### Pause / Unpause
 //! The admin can halt all mutating governance operations by calling
 //! [`GovernanceContract::pause`]. This sets a boolean flag in instance storage
-//! and emits a `pause` event. All entry-points that write state call the
+//! and emits a `paused` event. All entry-points that write state call the
 //! internal `assert_not_paused` guard. The contract is re-enabled with
-//! [`GovernanceContract::unpause`], which emits an `unpause` event.
+//! [`GovernanceContract::unpause`], which emits an `unpaused` event.
 //!
 //! ### Fee Configuration
 //! [`GovernanceContract::set_fee_config`] stores a [`FeeConfig`] struct that
@@ -78,18 +78,18 @@
 //! |---|---|
 //! | `contract_upgraded` | Wasm upgrade succeeded |
 //! | `admin` | Admin transfer completed |
-//! | `pause` | Contract paused |
-//! | `unpause` | Contract unpaused |
+//! | `paused` | Contract paused |
+//! | `unpaused` | Contract unpaused |
 //! | `sys_param` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
-//! | `anchor_upserted` | Anchor created or replaced for an asset |
+//! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
 //! | `anchor_removed` | Anchor removed for an asset |
 
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    String, Symbol,
 };
 
 /// Minimum allowed fee in basis points (0.05%).
@@ -127,12 +127,16 @@ pub struct PendingRecovery {
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
+    /// Storage key for the contract admin address in instance storage.
     Admin,
     RecoveryAddress,
     PendingRecovery,
     SystemParam(Symbol),
+    /// Storage key for the fee configuration data in persistent storage.
     FeeConfig,
+    /// Storage key for the anchor address associated with a specific asset in persistent storage.
     Anchor(Address),
+    /// Storage key for the pause state flag in instance storage.
     Paused,
 }
 
@@ -245,8 +249,8 @@ impl GovernanceContract {
     ///
     /// ### Events
     /// - Emits `contract_upgraded` with topic
-    ///   `(Symbol("contract_upgraded"), new_wasm_hash)` and data
-    ///   `(caller)`.
+    ///   `(Symbol("contract_upgraded"), caller)` and data
+    ///   `(new_wasm_hash)`.
     ///
     /// ### Panics
     /// - If the caller is not the stored admin.
@@ -348,6 +352,7 @@ impl GovernanceContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -373,7 +378,7 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Sets `DataKey::Paused` to `true` in instance storage and emits a `pause` event.
+    /// Sets `DataKey::Paused` to `true` in instance storage and emits a `paused` event.
     ///
     /// # Errors
     ///
@@ -386,7 +391,7 @@ impl GovernanceContract {
         caller.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
-            .publish((symbol_short!("pause"),), (admin, true));
+            .publish((Symbol::new(&env, "paused"),), (admin, true));
     }
 
     /// Resumes normal contract operation after a pause.
@@ -404,7 +409,7 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Sets `DataKey::Paused` to `false` in instance storage and emits an `unpause` event.
+    /// Sets `DataKey::Paused` to `false` in instance storage and emits an `unpaused` event.
     ///
     /// # Errors
     ///
@@ -417,7 +422,7 @@ impl GovernanceContract {
         caller.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
-            .publish((symbol_short!("unpause"),), (admin, false));
+            .publish((Symbol::new(&env, "unpaused"),), (admin, false));
     }
 
     /// Returns whether the contract is currently paused.
@@ -507,9 +512,11 @@ impl GovernanceContract {
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
         let storage_key = DataKey::SystemParam(key);
         if env.storage().persistent().has(&storage_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&storage_key, 50_000, 100_000);
+            env.storage().persistent().extend_ttl(
+                &storage_key,
+                SYSTEM_PARAM_TTL_THRESHOLD,
+                SYSTEM_PARAM_TTL_BUMP,
+            );
         }
         env.storage().persistent().get(&storage_key)
     }
@@ -580,7 +587,17 @@ impl GovernanceContract {
     /// `Some(FeeConfig)` if a fee configuration has been set via [`set_fee_config`];
     /// `None` otherwise.
     pub fn get_fee_config(env: Env) -> Option<FeeConfig> {
-        env.storage().persistent().get(&DataKey::FeeConfig)
+        let key = DataKey::FeeConfig;
+        match env.storage().persistent().get(&key) {
+            Some(config) => {
+                // Extend persistent storage TTL using the same thresholds as set_fee_config
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
+                Some(config)
+            }
+            None => None,
+        }
     }
 
     /// Creates or updates the anchor address associated with a supported asset.
@@ -605,11 +622,16 @@ impl GovernanceContract {
     /// Writes the anchor address to persistent storage under `DataKey::Anchor(asset)`
     /// and emits an `anchor_upserted` event.
     ///
+    /// **Data**: `(Option<Address> previous, Address current)`
+    /// - `previous`: the previous anchor address if one existed, or `None` for new assets
+    /// - `current`: the new anchor address being set
+    ///
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn upsert_anchor(env: Env, caller: Address, asset: Address, anchor: Address) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
@@ -619,7 +641,7 @@ impl GovernanceContract {
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), anchor);
+            .publish((Symbol::new(&env, "anchor_upserted"), asset), (old_anchor, anchor));
     }
 
     /// Removes the anchor configuration for the given asset.
@@ -640,8 +662,8 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Removes `DataKey::Anchor(asset)` from persistent storage and emits both an
-    /// `anchor_rm` and an `anchor_removed` event.
+    /// Removes `DataKey::Anchor(asset)` from persistent storage and emits an
+    /// `anchor_removed` event.
     ///
     /// # Errors
     ///
@@ -662,9 +684,7 @@ impl GovernanceContract {
 
         env.storage().persistent().remove(&key);
         env.events()
-            .publish((symbol_short!("anchor_rm"), asset.clone()), true);
-        env.events()
-            .publish((Symbol::new(&env, "anchor_removed"), asset), true);
+            .publish((Symbol::new(&env, "anchor_removed"), asset), ());
     }
 
     /// Returns the anchor address registered for the given asset, if any.
@@ -681,14 +701,31 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         let result = env.storage().persistent().get(&key);
         if result.is_some() {
-            env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         }
         result
     }
 }
 
+/// Returns the administrator address stored in contract storage.
+///
+/// This helper is used internally by authorization checks throughout the
+/// governance contract and refreshes the instance TTL while reading the
+/// current admin value.
+///
+/// # Returns
+///
+/// The current administrator `Address` stored in persistent instance storage.
+///
+/// # Panics
+///
+/// Panics if the contract has not been initialized yet.
 fn read_admin(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -727,11 +764,26 @@ fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
+/// Ensures the governance contract is not currently paused.
+///
+/// This helper is called before mutating operations that should be disabled
+/// while the contract is paused. It enforces the pause state centrally so
+/// callers do not need to duplicate the check themselves.
+///
+/// # Panics
+///
+/// Panics with `GovernanceError::Paused` if the contract is currently paused.
 fn assert_not_paused(env: &Env) {
     if is_paused(env) {
         panic_with_error!(env, GovernanceError::Paused);
     }
 }
+
+#[cfg(test)]
+mod anchor_event_tests;
+
+#[cfg(test)]
+mod anchor_removal_test;
 
 #[cfg(test)]
 mod tests {
@@ -876,6 +928,20 @@ mod tests {
     }
 
     #[test]
+    fn anchor_upsert_overwrites_existing_anchor() {
+        let (env, client, admin) = setup();
+        let asset = Address::generate(&env);
+        let anchor_one = Address::generate(&env);
+        let anchor_two = Address::generate(&env);
+
+        client.upsert_anchor(&admin, &asset, &anchor_one);
+        assert_eq!(client.get_anchor(&asset), Some(anchor_one));
+
+        client.upsert_anchor(&admin, &asset, &anchor_two);
+        assert_eq!(client.get_anchor(&asset), Some(anchor_two));
+    }
+
+    #[test]
     #[should_panic]
     fn rejects_fee_bps_above_max() {
         let (_env, client, admin) = setup();
@@ -937,6 +1003,7 @@ mod tests {
         let missing_asset = Address::generate(&env);
         client.remove_anchor(&admin, &missing_asset);
     }
+    #[test]
     fn checks_if_initialized() {
         let env = Env::default();
         env.mock_all_auths();
@@ -948,6 +1015,28 @@ mod tests {
         assert!(!client.is_initialized());
         client.init(&admin, &recovery_address);
         assert!(client.is_initialized());
+    }
+
+    #[test]
+    fn emits_event_on_initialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        client.init(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "exactly one event emitted on init");
+
+        let (_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "initialized")
+        );
+        assert_eq!(Address::from_val(&env, &data), admin);
     }
 
     #[test]
@@ -1100,6 +1189,13 @@ mod tests {
     #[test]
     fn admin_functions_work_while_paused() {
         let (env, client, admin) = setup();
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+
+        // Set up anchor before pause
+        client.upsert_anchor(&admin, &asset, &anchor);
+        assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
+
         client.pause(&admin);
         assert!(client.is_paused());
 
@@ -1116,11 +1212,7 @@ mod tests {
         client.set_fee_config(&admin, &cfg);
         assert_eq!(client.get_fee_config().unwrap().platform_fee_bps, 120);
 
-        let asset = Address::generate(&env);
-        let anchor = Address::generate(&env);
-        client.upsert_anchor(&admin, &asset, &anchor);
-        assert_eq!(client.get_anchor(&asset), Some(anchor));
-
+        // remove_anchor still works while paused
         client.remove_anchor(&admin, &asset);
         assert_eq!(client.get_anchor(&asset), None);
 

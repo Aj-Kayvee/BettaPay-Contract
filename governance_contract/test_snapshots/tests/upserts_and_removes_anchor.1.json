@@ -498,7 +498,11 @@
               }
             ],
             "data": {
-              "bool": true
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
             }
           }
         }
@@ -520,9 +524,7 @@
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
               }
             ],
-            "data": {
-              "bool": true
-            }
+            "data": "void"
           }
         }
       },
