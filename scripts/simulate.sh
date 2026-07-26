@@ -155,6 +155,10 @@ SOROBAN_SOURCE_ADDRESS="$(soroban keys address "$SOROBAN_SOURCE")"
 assert_stellar_address "$SOROBAN_SOURCE_ADDRESS" "Source Address"
 log_info "Source address: $SOROBAN_SOURCE_ADDRESS"
 
+: "${RECOVERY_ADDRESS:=$SOROBAN_SOURCE_ADDRESS}"
+assert_stellar_address "$RECOVERY_ADDRESS" "Recovery Address"
+log_info "Recovery address: $RECOVERY_ADDRESS"
+
 # Fund account via Friendbot
 log_info "Checking friendbot funding status..."
 curl --silent --fail --show-error "${FRIENDBOT_URL}?addr=${SOROBAN_SOURCE_ADDRESS}" >/dev/null || log_warn "Friendbot funding request skipped or failed (account may already be funded)."
@@ -208,7 +212,7 @@ soroban contract invoke \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
   -- \
-  init --admin "$SOROBAN_SOURCE_ADDRESS"
+  init --admin "$SOROBAN_SOURCE_ADDRESS" --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
 log_success "Settlement contract initialized."
 
 # Initialize governance contract
@@ -219,7 +223,7 @@ soroban contract invoke \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
   -- \
-  init --admin "$SOROBAN_SOURCE_ADDRESS"
+  init --admin "$SOROBAN_SOURCE_ADDRESS" --recovery-address "$RECOVERY_ADDRESS"
 log_success "Governance contract initialized."
 
 # Print summary
@@ -228,6 +232,7 @@ echo -e "  ${GREEN}${BOLD}Simulation Bootstrap Complete${NC}"
 echo -e "========================================================================"
 echo -e "  Source Identity:      ${BOLD}$SOROBAN_SOURCE${NC}"
 echo -e "  Source address:       ${BOLD}$SOROBAN_SOURCE_ADDRESS${NC}"
+echo -e "  Recovery address:     ${BOLD}$RECOVERY_ADDRESS${NC}"
 echo -e "  Settlement contract:  ${GREEN}${BOLD}$SETTLEMENT_ID${NC}"
 echo -e "  Governance contract:  ${GREEN}${BOLD}$GOVERNANCE_ID${NC}"
 echo -e "========================================================================\n"
