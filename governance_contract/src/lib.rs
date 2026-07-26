@@ -833,6 +833,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn get_admin_panics_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.get_admin();
+    }
+
+    #[test]
     fn updates_system_parameters() {
         let (env, client, admin) = setup();
         let key = Symbol::new(&env, "max_settle");
