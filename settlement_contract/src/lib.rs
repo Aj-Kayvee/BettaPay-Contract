@@ -995,6 +995,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn get_admin_panics_before_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+        client.get_admin();
+    }
+
+    #[test]
     fn proposes_and_accepts_admin_successfully() {
         let (env, client, admin, _) = setup();
         let new_admin = Address::generate(&env);
