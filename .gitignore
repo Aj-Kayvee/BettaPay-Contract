@@ -7,7 +7,7 @@
 # Soroban compiled outputs
 *.optimized.wasm
 
-# Cargo lock (keep for apps, optional for libs — keeping for reproducible builds)
+# Cargo.lock deliberately tracked for reproducible builds.
 # Cargo.lock
 
 # Editor
