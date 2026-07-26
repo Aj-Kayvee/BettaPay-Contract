@@ -98,6 +98,8 @@ const MIN_FEE_BPS: u32 = 5;
 const MAX_FEE_BPS: u32 = 5_000;
 const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
 const FEE_TTL_BUMP: u32 = 17280 * 30;
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
+const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
 const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone)]
@@ -479,6 +481,9 @@ impl GovernanceContract {
         let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
 
         env.storage().persistent().set(&storage_key, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&storage_key, SYSTEM_PARAM_TTL_THRESHOLD, SYSTEM_PARAM_TTL_BUMP);
 
         // Structured for off-chain indexing: topics carry the event name and
         // the specific parameter key (so indexers can filter per-parameter),
