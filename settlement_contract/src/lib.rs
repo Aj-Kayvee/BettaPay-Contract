@@ -215,6 +215,11 @@ pub enum SettlementError {
     InvalidRecoveryAddress = 16,
     RecoveryNotPending = 17,
     RecoveryDelayActive = 18,
+    /// The combined fees (platform + network) exceed or equal the payment amount,
+    /// resulting in a non-positive merchant payout. This indicates the amount is
+    /// too small relative to the configured fee rates. Raised by `store_payment_reference`
+    /// and `calculate_fee_split` when merchant_amount would be <= 0.
+    InsufficientAmountForFees = 19,
 }
 
 #[contract]
@@ -667,6 +672,15 @@ impl SettlementContract {
 
         let rule = read_rule_or_default(&env, merchant.clone());
         let split = calculate_split(amount, &rule);
+
+        // Validate that the split is correct: merchant_amount must be positive.
+        // If combined fees (ceiling-divided independently) exceed the gross amount,
+        // merchant_amount would be non-positive, indicating the amount is too small
+        // for the configured fee rates.
+        if split.merchant_amount <= 0 {
+            panic_with_error!(&env, SettlementError::InsufficientAmountForFees);
+        }
+
         let record = PaymentRecord {
             merchant: merchant.clone(),
             amount,
@@ -724,6 +738,8 @@ impl SettlementContract {
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`InsufficientAmountForFees`](SettlementError::InsufficientAmountForFees) — if the combined fees
+    ///   (ceiling-divided independently) would equal or exceed the amount, resulting in a non-positive merchant payout.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -732,7 +748,15 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAmount);
         }
         let rule = read_rule_or_default(&env, merchant);
-        calculate_split(amount, &rule)
+        let split = calculate_split(amount, &rule);
+
+        // Validate that merchant_amount is positive. If combined fees exceed the amount,
+        // reject the split calculation as the amount is too small for the fee rates.
+        if split.merchant_amount <= 0 {
+            panic_with_error!(&env, SettlementError::InsufficientAmountForFees);
+        }
+
+        split
     }
 
     /// Retrieve a payment record by its reference, extending the storage TTL if found.
@@ -1594,14 +1618,14 @@ mod tests {
         assert_eq!(stored.amount, 100);
     }
 
-    // Issue #297: verify store_payment_reference succeeds when amount = MIN_PAYMENT_AMOUNT (100)
-    // combined with a platform_fee_bps of 10_000 (100%). The contract must accept the call since
-    // the amount meets the minimum threshold. With ceiling-based fee arithmetic, the platform fee
-    // consumes the entire gross amount (100 bps * 100 / 10_000 rounded up = 100), leaving the
-    // merchant with exactly 0. This documents the known edge case: at extreme fee rates and the
-    // minimum payment amount, the merchant payout is zero.
+    // Issue #297 & #305: Verify that store_payment_reference rejects payments where combined fees
+    // would result in a non-positive merchant payout. When amount = MIN_PAYMENT_AMOUNT (100)
+    // combined with platform_fee_bps = 10_000 (100%), the ceiling-divided platform fee
+    // would consume the entire gross amount, leaving merchant_amount = 0. This is now
+    // correctly rejected with InsufficientAmountForFees error.
     #[test]
-    fn store_payment_reference_min_amount_with_maximum_platform_fee_yields_zero_merchant_payout() {
+    #[should_panic]
+    fn store_payment_reference_rejects_when_fees_exceed_amount() {
         let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
 
@@ -1614,43 +1638,164 @@ mod tests {
         };
         client.set_settlement_rule(&merchant, &rule);
 
-        // Use a distinct reference (different from [100; 32] used in accepts_valid_minimum_amount).
+        // Use a distinct reference.
         let reference = BytesN::from_array(&env, &[101; 32]);
 
-        // store_payment_reference must succeed: amount = 100 satisfies the MIN_PAYMENT_AMOUNT check.
+        // This call must fail: amount = 100 with 100% platform fee results in merchant_amount = 0,
+        // which violates the invariant that merchant_amount must be positive.
+        client.store_payment_reference(&merchant, &reference, &100);
+    }
+
+    // Issue #305: Test that calculate_fee_split correctly validates merchant_amount > 0
+    // and rejects cases where combined ceiling-divided fees exceed the amount.
+    #[test]
+    #[should_panic]
+    fn calculate_fee_split_rejects_when_fees_exceed_amount() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        // Set a rule with platform_fee_bps = 10_000 (100%) and no network fee.
+        let rule = SettlementRule {
+            platform_fee_bps: 10_000,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+
+        // This call must fail: amount = 100 with 100% platform fee results in merchant_amount = 0.
+        client.calculate_fee_split(&merchant, &100);
+    }
+
+    // Test that fee splits work correctly when fees are high but merchant_amount stays positive.
+    // With amount=1000, platform_fee_bps=5000 (50%), network_fee_bps=4999 (49.99%):
+    //   platform_fee = ceil(1000 * 5000 / 10000) = 500
+    //   network_fee = ceil(1000 * 4999 / 10000) = 500 (ceiling of 499.9)
+    //   merchant_amount = 1000 - 500 - 500 = 0 — this should REJECT
+    #[test]
+    #[should_panic]
+    fn store_payment_reference_rejects_high_fee_combination_that_rounds_to_exceed_amount() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 5000,
+            network_fee_bps: 4999,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+
+        let reference = BytesN::from_array(&env, &[102; 32]);
+        // amount = 1000 is >= MIN_PAYMENT_AMOUNT but combined fees round to total >= 1000
+        client.store_payment_reference(&merchant, &reference, &1000);
+    }
+
+    // Regression test: verify that normal amounts with reasonable fee rates work correctly.
+    // With amount=10000, platform_fee_bps=200 (2%), network_fee_bps=100 (1%):
+    //   platform_fee = ceil(10000 * 200 / 10000) = 200
+    //   network_fee = ceil(10000 * 100 / 10000) = 100
+    //   merchant_amount = 10000 - 200 - 100 = 9700 > 0 ✓
+    #[test]
+    fn store_payment_reference_succeeds_with_normal_amounts_and_reasonable_fees() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 200,
+            network_fee_bps: 100,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+
+        let reference = BytesN::from_array(&env, &[103; 32]);
+        let split = client.store_payment_reference(&merchant, &reference, &10_000);
+
+        assert_eq!(split.gross_amount, 10_000);
+        assert_eq!(split.platform_fee_amount, 200);
+        assert_eq!(split.network_fee_amount, 100);
+        assert_eq!(split.merchant_amount, 9_700);
+
+        // Verify invariant: sum of all parts equals gross amount
+        assert_eq!(
+            split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+            split.gross_amount
+        );
+    }
+
+    // Boundary test: find the minimum amount for given fee rates that produces a positive merchant_amount.
+    // With platform_fee_bps=5000 (50%), network_fee_bps=5000 (50%), at amount=2:
+    //   platform_fee = ceil(2 * 5000 / 10000) = ceil(1) = 1
+    //   network_fee = ceil(2 * 5000 / 10000) = ceil(1) = 1
+    //   merchant_amount = 2 - 1 - 1 = 0 — rejected
+    // At amount=3:
+    //   platform_fee = ceil(3 * 5000 / 10000) = ceil(1.5) = 2
+    //   network_fee = ceil(3 * 5000 / 10000) = ceil(1.5) = 2
+    //   merchant_amount = 3 - 2 - 2 = -1 — rejected
+    // This demonstrates that 50%+50% fees cannot produce positive merchant_amount at any small amount.
+    // Instead, test with 49%+50% at amount=100:
+    //   platform_fee = ceil(100 * 4900 / 10000) = ceil(49) = 49
+    //   network_fee = ceil(100 * 5000 / 10000) = ceil(50) = 50
+    //   merchant_amount = 100 - 49 - 50 = 1 > 0 ✓
+    #[test]
+    fn store_payment_reference_at_boundary_minimum_amount_for_high_fees() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 4900,
+            network_fee_bps: 5000,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+
+        let reference = BytesN::from_array(&env, &[104; 32]);
         let split = client.store_payment_reference(&merchant, &reference, &100);
 
-        // With 100% platform fee and ceiling arithmetic:
-        //   platform_fee_amount = ceil(100 * 10_000 / 10_000) = 100
-        //   network_fee_amount  = 0
-        //   merchant_amount     = 100 - 100 - 0 = 0
-        assert_eq!(
-            split.gross_amount, 100,
-            "gross amount must equal the submitted payment amount"
-        );
-        assert_eq!(
-            split.platform_fee_amount, 100,
-            "platform fee must absorb the entire gross amount at 100% fee rate"
-        );
-        assert_eq!(
-            split.network_fee_amount, 0,
-            "network fee must be zero when network_fee_bps is 0"
-        );
-        assert_eq!(
-            split.merchant_amount, 0,
-            "merchant payout must be exactly 0 when fees consume the full gross amount"
-        );
+        assert_eq!(split.gross_amount, 100);
+        assert_eq!(split.platform_fee_amount, 49);
+        assert_eq!(split.network_fee_amount, 50);
+        assert_eq!(split.merchant_amount, 1);
 
-        // Confirm the stored record reflects the same computed values.
-        let stored = client
-            .get_payment_reference(&reference)
-            .expect("payment record must be present after successful store");
-        assert_eq!(stored.amount, 100);
-        assert_eq!(stored.platform_fee_amount, 100);
-        assert_eq!(stored.network_fee_amount, 0);
-        assert_eq!(stored.merchant_amount, 0);
-        assert_eq!(stored.platform_fee_bps, 10_000);
-        assert_eq!(stored.network_fee_bps, 0);
+        // Verify invariant: sum must equal gross amount
+        assert_eq!(
+            split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+            split.gross_amount
+        );
+    }
+
+    // Test calculate_fee_split (without storage) also correctly rejects insufficient merchant payout.
+    #[test]
+    #[should_panic]
+    fn calculate_fee_split_rejects_insufficient_merchant_amount() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 5000,
+            network_fee_bps: 5000,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        // Note: This rule should fail at set_settlement_rule because 5000 + 5000 = 10000 is valid,
+        // but for testing calculate_fee_split, we'd need to use a rule that is valid but produces
+        // merchant_amount <= 0. Since fee-sum limits prevent 50%+50%, let's use 49%+51% which sums to 10000.
+        // Actually, 49% + 51% = 100%, so at amount=100: fees = 49 + 51 = 100, merchant = 0.
+        // But the contract rejects fees > 10000 bps total, so 4900 + 5100 = 10000 is valid.
+        // At amount=100: fees = 49 + 51 = 100, merchant = 0 — exactly at boundary.
+        // Use amount=99: platform = ceil(99*4900/10000) = ceil(48.51) = 49, network = ceil(99*5100/10000) = ceil(50.49) = 51, merchant = 99-49-51 = -1.
+        let rule_exactly_at_limit = SettlementRule {
+            platform_fee_bps: 4900,
+            network_fee_bps: 5100,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule_exactly_at_limit);
+
+        // At amount=99, merchant_amount would be negative.
+        client.calculate_fee_split(&merchant, &99);
     }
 
     #[test]
