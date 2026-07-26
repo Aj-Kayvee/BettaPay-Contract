@@ -32,6 +32,15 @@
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
 
+// TODO: Refactor flat file structure into modular hierarchy (Issue #84)
+// Intended module structure:
+// - mod types: Data structures (enums, structs)
+// - mod storage: DataKey and storage access helpers
+// - mod events: Event definitions and emission helpers
+// - mod errors: Error enums
+// - mod contract: Main contract trait implementation
+// - mod test: Unit and integration tests
+
 #![no_std]
 
 use soroban_sdk::{
