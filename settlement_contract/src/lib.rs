@@ -26,7 +26,6 @@
 //! - The calculated amounts and fee BPS.
 //! - The ledger sequence of the transaction.
 //! - Settlement delay and auto-settle configurations.
-//! - The associated merchant address.
 //!
 //! The contract leverages different `DataKey` variants (`Admin`, `Merchant`, `Rule`, `Payment`, etc.)
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
@@ -110,9 +109,6 @@ pub struct FeeSplit {
 #[derive(Clone)]
 #[contracttype]
 pub struct PaymentRecord {
-    /// The address of the merchant receiving the payment.
-    /// Set when the payment reference is stored, used to determine who is authorized to settle.
-    pub merchant: Address,
     /// The total gross amount of the payment processed.
     /// Set upon payment creation and used to derive the fee split.
     pub amount: i128,
@@ -668,7 +664,6 @@ impl SettlementContract {
         let rule = read_rule_or_default(&env, merchant.clone());
         let split = calculate_split(amount, &rule);
         let record = PaymentRecord {
-            merchant: merchant.clone(),
             amount,
             platform_fee_amount: split.platform_fee_amount,
             network_fee_amount: split.network_fee_amount,
@@ -2541,7 +2536,6 @@ mod tests {
         let (ref1, record): (BytesN<32>, PaymentRecord) =
             FromVal::from_val(&env, &data1);
         assert_eq!(ref1, reference);
-        assert_eq!(record.merchant, merchant);
         assert_eq!(record.amount, 20_000);
         assert_eq!(record.platform_fee_amount, 500);
         assert_eq!(record.network_fee_amount, 100);
@@ -2693,7 +2687,6 @@ mod tests {
         assert_eq!(split.network_fee_amount, 0);
         assert_eq!(split.merchant_amount, 9_900);
     }
-}
 
     // Issue #72: verify non-admin transfer_admin calls are rejected
     #[test]
