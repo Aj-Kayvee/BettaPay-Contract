@@ -1462,6 +1462,28 @@ mod tests {
         assert_eq!(payments.len(), 0);
     }
 
+    // Issue #300: verify get_payments correctly filters out missing references and returns records for valid ones.
+    #[test]
+    fn get_payments_with_mixed_valid_and_missing_references() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let valid_one = BytesN::from_array(&env, &[80; 32]);
+        let valid_two = BytesN::from_array(&env, &[81; 32]);
+        let missing_ref = BytesN::from_array(&env, &[82; 32]);
+
+        client.store_payment_reference(&merchant, &valid_one, &10_000);
+        client.store_payment_reference(&merchant, &valid_two, &20_000);
+
+        // Query with: [valid_one, missing_ref, valid_two]
+        let references = Vec::from_array(&env, [valid_one.clone(), missing_ref, valid_two.clone()]);
+        let payments = client.get_payments(&references);
+
+        assert_eq!(payments.len(), 2);
+        assert_eq!(payments.get(0).unwrap().amount, 10_000);
+        assert_eq!(payments.get(1).unwrap().amount, 20_000);
+    }
+
     #[test]
     fn calculates_split_without_storing_reference() {
         let (_env, client, _admin, merchant) = setup();
