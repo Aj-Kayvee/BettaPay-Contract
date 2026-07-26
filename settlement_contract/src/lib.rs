@@ -1410,6 +1410,14 @@ mod tests {
     }
 
     #[test]
+    fn get_payment_reference_returns_none_for_unknown() {
+        let (env, client, _, _) = setup();
+        let unknown_ref = BytesN::from_array(&env, &[0xab; 32]);
+        let result = client.get_payment_reference(&unknown_ref);
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn gets_payments_in_batches() {
         let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
