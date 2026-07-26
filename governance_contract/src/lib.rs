@@ -168,6 +168,10 @@ pub enum GovernanceError {
     InvalidRecoveryAddress = 9,
     RecoveryNotPending = 10,
     RecoveryDelayActive = 11,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused = 12,
+    /// `unpause` was called while the contract was already unpaused.
+    AlreadyUnpaused = 13,
 }
 
 #[contract]
@@ -389,12 +393,16 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
+    /// Panics with `GovernanceError::AlreadyPaused` if the contract is already paused.
     pub fn pause(env: Env, caller: Address) {
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
+        if is_paused(&env) {
+            panic_with_error!(&env, GovernanceError::AlreadyPaused);
+        }
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
             .publish((Symbol::new(&env, "paused"),), (admin, true));
@@ -420,12 +428,16 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
+    /// Panics with `GovernanceError::AlreadyUnpaused` if the contract is not currently paused.
     pub fn unpause(env: Env, caller: Address) {
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
+        if !is_paused(&env) {
+            panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
+        }
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((Symbol::new(&env, "unpaused"),), (admin, false));
@@ -1346,5 +1358,41 @@ mod tests {
         let non_admin = Address::generate(&env);
         let key = Symbol::new(&env, "max_settle");
         client.update_system_param(&non_admin, &key, &1440);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #12)")]
+    fn pause_rejects_when_already_paused() {
+        let (_env, client, admin) = setup();
+        client.pause(&admin);
+        assert!(client.is_paused());
+        // Pausing again should be rejected instead of emitting a redundant event.
+        client.pause(&admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #13)")]
+    fn unpause_rejects_when_already_unpaused() {
+        let (_env, client, admin) = setup();
+        assert!(!client.is_paused());
+        // Contract starts unpaused; unpausing again should be rejected.
+        client.unpause(&admin);
+    }
+
+    #[test]
+    fn pause_then_unpause_round_trip_succeeds() {
+        let (env, client, admin) = setup();
+
+        assert!(!client.is_paused());
+
+        let before_pause = env.events().all().len();
+        client.pause(&admin);
+        assert!(client.is_paused());
+        assert!(env.events().all().len() > before_pause);
+
+        let before_unpause = env.events().all().len();
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+        assert!(env.events().all().len() > before_unpause);
     }
 }
