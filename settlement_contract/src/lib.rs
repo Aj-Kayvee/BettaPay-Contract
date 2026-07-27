@@ -60,6 +60,34 @@
 //!
 //! Full guidance, including worked examples and how to test a migration, is in
 //! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
+//!
+//! ## Event Convention
+//!
+//! This contract follows a consistent event emission pattern (see Issue #49):
+//!
+//! **Topics** carry the fixed event-name symbol and filterable entity
+//! identifiers. The first topic is always a [`Symbol`] naming the event type,
+//! enabling indexers to filter by event kind. Subsequent topics hold the
+//! primary identifiers relevant to the event (e.g., merchant address, payment
+//! reference), so listeners can subscribe to events for a specific entity
+//! without scanning all events.
+//!
+//! **Data** carries caller context and event-specific details — information
+//! that is useful once the event has been matched by topic but is not needed
+//! for filtering. Typically this includes the caller's address (admin) and
+//! any before/after values or configuration data.
+//!
+//! ### Canonical Example
+//!
+//! [`SettlementContract::register_merchant`] is the canonical example of this convention:
+//!
+//! | Role   | Value                                                       |
+//! |--------|-------------------------------------------------------------|
+//! | Topics | `(Symbol("merchant_registered"), Address merchant)`         |
+//! | Data   | `Address caller` (the admin who authorized the registration)|
+//!
+//! New events should follow the same pattern: filterable identifiers in
+//! topics, caller context and details in data.
 
 // TODO: Refactor flat file structure into modular hierarchy (Issue #84)
 // Intended module structure:
