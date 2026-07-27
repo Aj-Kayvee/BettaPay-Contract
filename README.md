@@ -14,9 +14,10 @@ BettaPay-Contract/
 ├── governance_contract/        # Fee config, anchor registry, system params
 │   ├── Cargo.toml
 │   └── src/lib.rs
-└── scripts/
-    ├── deploy_testnet.sh       # Build + deploy both contracts + init admin
-    └── simulate.sh             # Simulate contract calls locally
+├── scripts/
+│   ├── deploy_testnet.sh       # Build + deploy both contracts + init admin
+│   └── simulate.sh             # Simulate contract calls locally
+└── DEVELOPMENT.md              # Upgrade and storage-migration guide
 ```
 
 ## Deployed Addresses (Testnet)
@@ -100,6 +101,7 @@ GOVERNANCE_ID=$(soroban contract deploy \
 
 # 5. Initialize both contracts
 ADMIN=$(soroban keys address bettapay-admin)
+RECOVERY_ADDRESS="$ADMIN"
 
 soroban contract invoke \
   --id "$SETTLEMENT_ID" \
@@ -107,7 +109,7 @@ soroban contract invoke \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  init --admin "$ADMIN"
+  init --admin "$ADMIN" --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
 
 soroban contract invoke \
   --id "$GOVERNANCE_ID" \
@@ -115,7 +117,7 @@ soroban contract invoke \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  init --admin "$ADMIN"
+  init --admin "$ADMIN" --recovery-address "$RECOVERY_ADDRESS"
 ```
 
 ### Invoke Settlement Contract
@@ -289,6 +291,9 @@ export SOROBAN_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 export SOROBAN_ACCOUNT="bettapay-admin"
 
 # Contract Addresses (update after deployment)
+# After deployment, update the contract IDs in:
+# - [BettaPay-Frontend](https://github.com/org/BettaPay-Frontend) `.env`
+# - [BettaPay-Backend](https://github.com/org/BettaPay-Backend) `.env`
 export SETTLEMENT_CONTRACT_ID="CBGBGKJSUY7XYB6HWW4CVAU6MW2KD25FSF45E5KCP53TKUK374MBZNFB"
 export GOVERNANCE_CONTRACT_ID="CDPFWUTIXF5BC6BKNDLSQOZSDQCXAJNZFCZWHBE2RRHANRN25T3ILPZ7"
 export ADMIN_ADDRESS="GCCHHKNI7GRA5QWC7RCTT3OHO7SKAUMKQA6IBWEQEO2SXI3GF376UHDD"
@@ -421,8 +426,13 @@ pub struct PaymentRecord {
 
 | Function | Inputs | Output | Auth / Guard | Error Panics (`SettlementError`) | Description |
 |---|---|---|---|---|---|
-| `init` | `admin: Address` | `()` | `admin` | `AlreadyInitialized` | Initializes the contract and stores the administrator. Can only be called once. |
+| `init` | `admin: Address`, `governance: Address`, `recovery_address: Address` | `()` | `admin` | `AlreadyInitialized`, `InvalidGovernance`, `InvalidRecoveryAddress` | Initializes the contract and stores the administrator, governance contract, and backup recovery address. Can only be called once. |
 | `get_admin` | None | `Address` | None | `NotInitialized` | Returns the current admin address. |
+| `get_governance` | None | `Address` | None | `NotInitialized` | Returns the configured governance contract address. |
+| `update_governance` | `new_governance: Address` | `()` | Stored Admin, not paused | `NotInitialized`, `Paused`, `InvalidGovernance` | Updates the governance contract address after validating `get_fee_config`. |
+| `initiate_recovery` | `new_admin: Address` | `()` | Recovery Address | `NotInitialized`, `InvalidAdmin` | Starts delayed admin recovery. |
+| `cancel_recovery` | None | `()` | Stored Admin | `NotInitialized`, `RecoveryNotPending` | Cancels a pending recovery during the delay. |
+| `execute_recovery` | None | `()` | None | `RecoveryNotPending`, `RecoveryDelayActive` | Applies pending recovery after the 7-day delay. |
 | `transfer_admin` | `new_admin: Address` | `()` | Stored Admin | `NotInitialized`, `InvalidAddress`, `InvalidAdmin` | Transfers the administrative control to a new address. `new_admin` cannot be zero or the current admin. |
 | `pause` | None | `()` | Stored Admin | `NotInitialized`, `Unauthorized` | Halts mutating operations (e.g. register merchant, store payment reference). |
 | `unpause` | None | `()` | Stored Admin | `NotInitialized`, `Unauthorized` | Resumes mutating contract operations. |
@@ -430,11 +440,9 @@ pub struct PaymentRecord {
 | `register_merchant`| `merchant: Address` | `()` | Stored Admin | `Paused`, `InvalidAddress`, `MerchantExists` | Registers a new merchant. The merchant must not already exist and cannot be the zero address. |
 | `unregister_merchant`| `merchant: Address`| `()` | Stored Admin | `Paused`, `MerchantMissing` | Removes a merchant from the registry and deletes their specific rule. |
 | `set_settlement_rule`| `merchant: Address`, `rule: SettlementRule` | `()` | Stored Admin | `Paused`, `MerchantMissing`, `InvalidFeeBps`, `InvalidSettlementDelay` | Sets merchant-specific override fees and delay parameters. Sum of bps must be $\le 10,000$. |
-| `clear_settlement_rule`| `merchant: Address`| `()` | Stored Admin | `RuleNotSet` | Deletes a merchant-specific rule override, forcing a fallback to default → governance → bootstrap. |
+| `clear_settlement_rule`| `merchant: Address`| `()` | Stored Admin | `MerchantRuleNotSet` | Deletes a merchant-specific rule override, forcing a fallback to default → governance → bootstrap. |
 | `set_default_rule` | `new_rule: SettlementRule` | `()` | Stored Admin | `InvalidFeeBps`, `InvalidSettlementDelay` | Configures the global fallback rule applied when no merchant-specific rule exists. |
 | `get_default_rule` | None | `Option<SettlementRule>` | None | None | Fetches the global default settlement rule configuration, if any. |
-| `set_governance` | `governance: Address` | `()` | Stored Admin | `Paused`, `InvalidAddress` | Stores the governance contract used as the protocol fee source when no merchant/default rule exists. |
-| `get_governance` | None | `Option<Address>` | None | None | Returns the configured governance contract address, if any. |
 | `store_payment_reference`| `merchant: Address`, `reference: BytesN<32>`, `amount: i128` | `FeeSplit` | `merchant` | `Paused`, `MerchantMissing`, `InvalidPaymentReference`, `InvalidAmount`, `DuplicatePaymentReference` | Records a payment hash on-chain and returns the fee split. `amount` must be $\ge 100$. |
 | `is_merchant_registered`| `merchant: Address` | `bool` | None | None | Checks if a merchant is present in the registry. |
 | `get_settlement_rule`| `merchant: Address` | `Option<SettlementRule>` | None | None | Reads the merchant-specific settlement rule override. |
@@ -472,10 +480,14 @@ pub struct AdminTransferred {
 
 | Function | Inputs | Output | Auth / Guard | Error Panics (`GovernanceError`) | Description |
 |---|---|---|---|---|---|
-| `init` | `admin: Address` | `()` | `admin` | `AlreadyInitialized` | Initializes the governance contract and sets the administrator. |
+| `init` | `admin: Address`, `recovery_address: Address` | `()` | `admin` | `AlreadyInitialized`, `InvalidRecoveryAddress` | Initializes the governance contract and stores the administrator and backup recovery address. |
 | `is_initialized` | None | `bool` | None | None | Returns `true` if initialization has been completed. |
 | `get_admin` | None | `Address` | None | `NotInitialized` | Returns the current admin address. |
-| `upgrade` | `caller: Address`, `new_wasm_hash: BytesN<32>` | `()` | `caller == admin` | `Unauthorized` | Replaces the contract Wasm code with a new binary, leaving storage unchanged. |
+| `get_recovery_address` | None | `Address` | None | `NotInitialized` | Returns the configured backup recovery address. |
+| `initiate_recovery` | `new_admin: Address` | `()` | Recovery Address | `NotInitialized`, `InvalidAdmin` | Starts delayed admin recovery. |
+| `cancel_recovery` | None | `()` | Stored Admin | `NotInitialized`, `RecoveryNotPending` | Cancels a pending recovery during the delay. |
+| `execute_recovery` | None | `()` | None | `RecoveryNotPending`, `RecoveryDelayActive` | Applies pending recovery after the 7-day delay. |
+| `upgrade` | `caller: Address`, `new_wasm_hash: BytesN<32>` | `()` | `caller == admin` | `Unauthorized` | Replaces the contract Wasm code with a new binary, leaving storage unchanged. Changing a stored type needs a migration — see [DEVELOPMENT.md](DEVELOPMENT.md). |
 | `transfer_admin` | `_caller: Address`, `new_admin: Address` | `()` | Stored Admin | `InvalidAdmin` | Assigns the admin role to `new_admin`. Address cannot be zero or the current admin. |
 | `pause` | `caller: Address` | `()` | `caller == admin` | `Unauthorized` | Halts mutating governance config operations. |
 | `unpause` | `caller: Address` | `()` | `caller == admin` | `Unauthorized` | Resumes governance operations. |

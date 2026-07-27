@@ -3,6 +3,10 @@
 # Run from inside BettaPay-Contract/
 set -euo pipefail
 
+# Load shared helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
 # ---- Configurable defaults ------------------------------------------------
 : "${SOROBAN_RPC_URL:=https://soroban-testnet.stellar.org}"
 : "${SOROBAN_NETWORK_PASSPHRASE:=Test SDF Network ; September 2015}"
@@ -62,81 +66,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ANSI color codes
-BOLD='\033[1m'
-BLUE='\033[34m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-RED='\033[31m'
-NC='\033[0m' # No Color
-
-# Helper logging functions
-log_info() {
-  echo -e "${BLUE}${BOLD}[INFO]${NC} $1"
-}
-
-log_success() {
-  echo -e "${GREEN}${BOLD}[SUCCESS]${NC} $1"
-}
-
-log_warn() {
-  echo -e "${YELLOW}${BOLD}[WARNING]${NC} $1"
-}
-
-log_error() {
-  echo -e "${RED}${BOLD}[ERROR]${NC} $1" >&2
-}
-
-# Helper assertion functions
-assert_command() {
-  local cmd="$1"
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    log_error "Required command '$cmd' is not installed or not in PATH."
-    exit 1
-  fi
-}
-
-assert_file_exists() {
-  local file="$1"
-  if [ ! -f "$file" ]; then
-    log_error "Required file '$file' not found."
-    exit 1
-  fi
-}
-
-assert_non_empty() {
-  local val="$1"
-  local name="$2"
-  if [ -z "$val" ]; then
-    log_error "Assertion failed: '$name' is empty."
-    exit 1
-  fi
-}
-
-assert_stellar_address() {
-  local addr="$1"
-  local name="$2"
-  assert_non_empty "$addr" "$name"
-  if [[ ! "$addr" =~ ^G[A-Z2-7]{55}$ ]]; then
-    log_error "Assertion failed: '$name' ('$addr') is not a valid Stellar address."
-    exit 1
-  fi
-}
-
-assert_contract_id() {
-  local id="$1"
-  local name="$2"
-  assert_non_empty "$id" "$name"
-  if [[ ! "$id" =~ ^C[A-Z2-7]{55}$ ]]; then
-    log_error "Assertion failed: '$name' ('$id') is not a valid Soroban contract address."
-    exit 1
-  fi
-}
-
 # Ensure Soroban CLI is available
 assert_command soroban
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$ROOT_DIR"
 
 log_info "Initializing simulation with RPC URL: $SOROBAN_RPC_URL"
@@ -154,6 +87,10 @@ fi
 SOROBAN_SOURCE_ADDRESS="$(soroban keys address "$SOROBAN_SOURCE")"
 assert_stellar_address "$SOROBAN_SOURCE_ADDRESS" "Source Address"
 log_info "Source address: $SOROBAN_SOURCE_ADDRESS"
+
+: "${RECOVERY_ADDRESS:=$SOROBAN_SOURCE_ADDRESS}"
+assert_stellar_address "$RECOVERY_ADDRESS" "Recovery Address"
+log_info "Recovery address: $RECOVERY_ADDRESS"
 
 # Fund account via Friendbot
 log_info "Checking friendbot funding status..."
@@ -208,7 +145,7 @@ soroban contract invoke \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
   -- \
-  init --admin "$SOROBAN_SOURCE_ADDRESS"
+  init --admin "$SOROBAN_SOURCE_ADDRESS" --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
 log_success "Settlement contract initialized."
 
 # Initialize governance contract
@@ -219,7 +156,7 @@ soroban contract invoke \
   --rpc-url "$SOROBAN_RPC_URL" \
   --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
   -- \
-  init --admin "$SOROBAN_SOURCE_ADDRESS"
+  init --admin "$SOROBAN_SOURCE_ADDRESS" --recovery-address "$RECOVERY_ADDRESS"
 log_success "Governance contract initialized."
 
 # Print summary
@@ -228,6 +165,7 @@ echo -e "  ${GREEN}${BOLD}Simulation Bootstrap Complete${NC}"
 echo -e "========================================================================"
 echo -e "  Source Identity:      ${BOLD}$SOROBAN_SOURCE${NC}"
 echo -e "  Source address:       ${BOLD}$SOROBAN_SOURCE_ADDRESS${NC}"
+echo -e "  Recovery address:     ${BOLD}$RECOVERY_ADDRESS${NC}"
 echo -e "  Settlement contract:  ${GREEN}${BOLD}$SETTLEMENT_ID${NC}"
 echo -e "  Governance contract:  ${GREEN}${BOLD}$GOVERNANCE_ID${NC}"
 echo -e "========================================================================\n"

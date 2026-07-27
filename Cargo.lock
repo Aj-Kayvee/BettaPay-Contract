@@ -1147,7 +1147,6 @@ dependencies = [
 name = "settlement_contract"
 version = "0.1.0"
 dependencies = [
- "governance_contract",
  "proptest",
  "soroban-sdk",
 ]
