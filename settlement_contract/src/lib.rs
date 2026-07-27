@@ -72,11 +72,11 @@
 
 #![no_std]
 
+use soroban_sdk::testutils::storage::Persistent;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, String, Symbol, Val, Vec,
 };
-use soroban_sdk::testutils::storage::Persistent;
 
 const BPS_DENOMINATOR: u32 = 10_000;
 const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
@@ -405,7 +405,10 @@ impl SettlementContract {
         admin.require_auth();
 
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash.clone()),
+            (
+                Symbol::new(&env, "contract_upgraded"),
+                new_wasm_hash.clone(),
+            ),
             admin,
         );
 
@@ -643,9 +646,11 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .set(&DataKey::DefaultRule, &new_rule);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::DefaultRule, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DefaultRule,
+            RULE_TTL_THRESHOLD,
+            RULE_TTL_BUMP,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "default_rule_updated"),),
@@ -734,7 +739,11 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "payment_stored"), merchant.clone(), reference.clone()),
+            (
+                Symbol::new(&env, "payment_stored"),
+                merchant.clone(),
+                reference.clone(),
+            ),
             (),
         );
 
@@ -789,9 +798,11 @@ impl SettlementContract {
         if record.is_some() {
             let ttl = env.storage().persistent().get_ttl(&key);
             if ttl < PAYMENT_TTL_THRESHOLD {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    PAYMENT_TTL_THRESHOLD,
+                    PAYMENT_TTL_BUMP,
+                );
             }
         }
         record
@@ -1001,17 +1012,17 @@ mod tests {
         let (env, client, admin, _) = setup();
         let wasm = soroban_sdk::Bytes::from_slice(&env, &[]);
         let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
-        
+
         let before = env.events().all().len();
         // Verifies the structural update pass completes without panicking
         client.upgrade(&new_wasm_hash);
-        
+
         let events = env.events().all();
         assert!(events.len() > before);
-        
+
         let event = events.last().unwrap();
         let (_contract_id, topics, data) = event;
-        
+
         assert_eq!(
             Symbol::from_val(&env, &topics.get(0).unwrap()),
             Symbol::new(&env, "contract_upgraded")
@@ -1248,7 +1259,8 @@ mod tests {
         // hops, touching the contract via get_admin() between hops, so the
         // instance's own (much shorter) TTL doesn't expire along the way.
         for _ in 0..5 {
-            env.ledger().set_sequence_number(env.ledger().sequence() + 60_000);
+            env.ledger()
+                .set_sequence_number(env.ledger().sequence() + 60_000);
             client.get_admin();
         }
 
@@ -1283,7 +1295,8 @@ mod tests {
         };
         client.set_settlement_rule(&merchant, &rule);
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1000);
 
         let reference = BytesN::from_array(&env, &[42; 32]);
         client.store_payment_reference(&merchant, &reference, &10_000);
@@ -1312,7 +1325,8 @@ mod tests {
         };
         client.set_default_rule(&global_rule);
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1000);
 
         client.calculate_fee_split(&merchant, &50_000);
 
@@ -1339,7 +1353,8 @@ mod tests {
         };
         client.set_default_rule(&global_rule);
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1000);
 
         let retrieved = client.get_default_rule();
         assert!(retrieved.is_some());
@@ -1888,11 +1903,23 @@ mod tests {
         assert_eq!(admin_addr, _admin);
         assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
         assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
-        assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+        assert_eq!(
+            removed.settlement_delay_ledger,
+            rule.settlement_delay_ledger
+        );
         assert_eq!(removed.auto_settle, rule.auto_settle);
-        assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
-        assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
-        assert_eq!(fallback.settlement_delay_ledger, BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger);
+        assert_eq!(
+            fallback.platform_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+        );
+        assert_eq!(
+            fallback.network_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+        );
+        assert_eq!(
+            fallback.settlement_delay_ledger,
+            BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
+        );
         assert_eq!(fallback.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
     }
 
@@ -1935,11 +1962,23 @@ mod tests {
             FromVal::from_val(&env, &data);
         assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
         assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
-        assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+        assert_eq!(
+            removed.settlement_delay_ledger,
+            rule.settlement_delay_ledger
+        );
         assert_eq!(removed.auto_settle, rule.auto_settle);
-        assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
-        assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
-        assert_eq!(fallback.settlement_delay_ledger, BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger);
+        assert_eq!(
+            fallback.platform_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+        );
+        assert_eq!(
+            fallback.network_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+        );
+        assert_eq!(
+            fallback.settlement_delay_ledger,
+            BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
+        );
         assert_eq!(fallback.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
     }
 
@@ -2401,11 +2440,17 @@ mod tests {
             FromVal::from_val(&env, &data);
         assert_eq!(removed.platform_fee_bps, merchant_rule.platform_fee_bps);
         assert_eq!(removed.network_fee_bps, merchant_rule.network_fee_bps);
-        assert_eq!(removed.settlement_delay_ledger, merchant_rule.settlement_delay_ledger);
+        assert_eq!(
+            removed.settlement_delay_ledger,
+            merchant_rule.settlement_delay_ledger
+        );
         assert_eq!(removed.auto_settle, merchant_rule.auto_settle);
         assert_eq!(fallback.platform_fee_bps, global_rule.platform_fee_bps);
         assert_eq!(fallback.network_fee_bps, global_rule.network_fee_bps);
-        assert_eq!(fallback.settlement_delay_ledger, global_rule.settlement_delay_ledger);
+        assert_eq!(
+            fallback.settlement_delay_ledger,
+            global_rule.settlement_delay_ledger
+        );
         assert_eq!(fallback.auto_settle, global_rule.auto_settle);
     }
 
@@ -2717,8 +2762,7 @@ mod tests {
         );
         assert_eq!(Address::from_val(&env, &topics1.get(1).unwrap()), merchant);
 
-        let (ref1, record): (BytesN<32>, PaymentRecord) =
-            FromVal::from_val(&env, &data1);
+        let (ref1, record): (BytesN<32>, PaymentRecord) = FromVal::from_val(&env, &data1);
         assert_eq!(ref1, reference);
         assert_eq!(record.amount, 20_000);
         assert_eq!(record.platform_fee_amount, 500);
@@ -3041,24 +3085,27 @@ mod tests {
         assert_eq!(split.merchant_amount, i128::MAX);
     }
 
+    // Issue #225: register_merchant must be blocked when the contract is paused.
     #[test]
-    fn merchant_registration_succeeds_when_paused() {
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn register_merchant_rejected_when_paused() {
         let (_env, client, _admin, merchant) = setup();
         client.pause();
         assert!(client.is_paused());
 
         client.register_merchant(&merchant);
-        assert!(client.is_merchant_registered(&merchant));
     }
 
+    // Issue #225: set_settlement_rule must be blocked when the contract is paused.
+    // The merchant must be registered before pausing, since register_merchant is also
+    // blocked while paused.
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Error(Contract, #9)")]
     fn set_settlement_rule_rejected_when_paused() {
         let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
         client.pause();
         assert!(client.is_paused());
-
-        client.register_merchant(&merchant);
 
         let rule = SettlementRule {
             platform_fee_bps: 250,
