@@ -245,6 +245,10 @@ pub enum SettlementError {
     InvalidRecoveryAddress = 16,
     RecoveryNotPending = 17,
     RecoveryDelayActive = 18,
+    /// The payment amount is large enough that multiplying it by a fee's
+    /// basis points would overflow `i128`. Raised by `calculate_split`
+    /// before the multiplication is attempted.
+    AmountOverflow = 19,
 }
 
 #[contract]
@@ -662,6 +666,7 @@ impl SettlementContract {
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
     /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
     /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
+    /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     ///
     /// ## Emitted Event: `payment_stored`
     ///
@@ -696,7 +701,7 @@ impl SettlementContract {
         }
 
         let rule = read_rule_or_default(&env, merchant.clone());
-        let split = calculate_split(amount, &rule);
+        let split = calculate_split(&env, amount, &rule);
         let record = PaymentRecord {
             merchant: merchant.clone(),
             amount,
@@ -754,6 +759,7 @@ impl SettlementContract {
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -762,7 +768,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAmount);
         }
         let rule = read_rule_or_default(&env, merchant);
-        calculate_split(amount, &rule)
+        calculate_split(&env, amount, &rule)
     }
 
     /// Retrieve a payment record by its reference, extending the storage TTL if found.
@@ -908,12 +914,23 @@ fn assert_not_paused(env: &Env) {
 }
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
-fn calculate_split(amount: i128, rule: &SettlementRule) -> FeeSplit {
+fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
+    let denom = BPS_DENOMINATOR as i128;
+
+    // Guard against `amount * bps + (denom - 1)` overflowing i128 before it is attempted below,
+    // so callers get a readable AmountOverflow error instead of a raw arithmetic-overflow panic.
+    // The `denom - 1` term (the ceil-rounding adjustment) is subtracted from the budget up front
+    // so the check stays exact at the boundary instead of leaving a narrow window where the
+    // multiplication is "safe" but the following `+ denom - 1` still overflows.
+    let max_bps = core::cmp::max(rule.platform_fee_bps, rule.network_fee_bps) as i128;
+    if max_bps > 0 && amount > (i128::MAX - (denom - 1)) / max_bps {
+        panic_with_error!(env, SettlementError::AmountOverflow);
+    }
+
     // Integer arithmetic is used instead of floats to ensure deterministic, reproducible smart contract execution.
     // Standard integer division (`/`) truncates fractions toward zero, causing precision loss and under-collecting fees.
     // To prevent fee under-collection, ceiling division is simulated by adding `BPS_DENOMINATOR - 1` to the numerator.
     // Edge case: For small amounts, ceil rounding can force fees to 1 unit even when the basis points represent a tiny fraction.
-    let denom = BPS_DENOMINATOR as i128;
     let platform_fee_amount = (amount * (rule.platform_fee_bps as i128) + denom - 1) / denom;
     let network_fee_amount = (amount * (rule.network_fee_bps as i128) + denom - 1) / denom;
 
@@ -2820,6 +2837,82 @@ mod tests {
         assert_eq!(split.platform_fee_amount, 5_000);
         assert_eq!(split.network_fee_amount, 2_500);
         assert_eq!(split.merchant_amount, 92_500);
+    }
+
+    // Issue #248: calculate_fee_split panics with a readable AmountOverflow error
+    // instead of a raw arithmetic-overflow panic when amount * bps would overflow i128.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #19)")]
+    fn calculate_fee_split_rejects_amount_that_would_overflow() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        // (i128::MAX - (BPS_DENOMINATOR - 1)) / 500 is the largest amount that stays
+        // safe through the ceil-rounding addition; one past it overflows.
+        let amount = (i128::MAX - (BPS_DENOMINATOR as i128 - 1)) / 500 + 1;
+        client.calculate_fee_split(&merchant, &amount);
+    }
+
+    // Issue #248: store_payment_reference is also protected, since it shares
+    // the same calculate_split code path as calculate_fee_split.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #19)")]
+    fn store_payment_reference_rejects_amount_that_would_overflow() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 250,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let reference = BytesN::from_array(&env, &[77; 32]);
+        // The max of the two bps values (500) determines the overflow boundary.
+        let amount = (i128::MAX - (BPS_DENOMINATOR as i128 - 1)) / 500 + 1;
+        client.store_payment_reference(&merchant, &reference, &amount);
+    }
+
+    // Issue #248: amounts right at the overflow boundary must still succeed normally.
+    #[test]
+    fn calculate_fee_split_accepts_amount_at_overflow_boundary() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let amount = (i128::MAX - (BPS_DENOMINATOR as i128 - 1)) / 500;
+        let split = client.calculate_fee_split(&merchant, &amount);
+        assert_eq!(split.gross_amount, amount);
+    }
+
+    // Issue #248: a zero-bps rule must never divide by zero in the overflow precheck.
+    #[test]
+    fn calculate_fee_split_with_zero_bps_rule_accepts_max_amount() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 0,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let split = client.calculate_fee_split(&merchant, &i128::MAX);
+        assert_eq!(split.gross_amount, i128::MAX);
+        assert_eq!(split.platform_fee_amount, 0);
+        assert_eq!(split.network_fee_amount, 0);
+        assert_eq!(split.merchant_amount, i128::MAX);
     }
 
     #[test]
