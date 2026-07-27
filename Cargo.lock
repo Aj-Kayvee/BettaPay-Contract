@@ -87,6 +87,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d809780667f4410e7c41b07f52439b94d2bdf8528eeedc287fa38d3b7f95d82"
 
 [[package]]
+name = "bettapay_common"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -482,6 +489,7 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 name = "governance_contract"
 version = "0.1.0"
 dependencies = [
+ "bettapay_common",
  "soroban-sdk",
 ]
 
@@ -975,6 +983,7 @@ dependencies = [
 name = "settlement_contract"
 version = "0.1.0"
 dependencies = [
+ "bettapay_common",
  "soroban-sdk",
 ]
 
