@@ -195,14 +195,23 @@ pub struct PendingRecovery {
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
+    /// Instance — singleton, read on every mutating call.
     Admin,
+    /// Instance — singleton address, rarely changes.
     RecoveryAddress,
+    /// Instance — singleton boolean flag, read on every mutating call.
     PendingRecovery,
+    /// Instance — singleton address, rarely changes.
     Governance,
+    /// Persistent — one per merchant, many entries.
     Merchant(Address),
+    /// Persistent — one per merchant, may expire.
     Rule(Address),
+    /// Persistent — single value but may be updated.
     DefaultRule,
+    /// Persistent — one per payment, high volume.
     Payment(BytesN<32>),
+    /// Instance — singleton boolean, read on every mutating call.
     Paused,
 }
 
