@@ -483,16 +483,26 @@ impl SettlementContract {
 
     /// Remove a merchant from the registry and clear any associated settlement rule.
     ///
-    /// Note: If a settlement rule exists for this merchant, it is silently
-    /// removed without emitting a `settlement_rule_cleared` event.
-    ///
     /// # Panics
     ///
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     ///
-    /// ## Emitted Event: `merchant_unregistered`
+    /// ## Emitted Events
+    ///
+    /// If the merchant has a settlement rule set, a `settlement_rule_cleared`
+    /// event is emitted before the `merchant_unregistered` event.
+    ///
+    /// ### `settlement_rule_cleared` (conditional)
+    ///
+    /// **Topics**: `(Symbol("settlement_rule_cleared"), Address merchant)`
+    ///
+    /// **Data**: `(Address caller, SettlementRule removed)`
+    /// - `caller`: the admin who authorized the unregistration
+    /// - `removed`: the settlement rule that was removed
+    ///
+    /// ### `merchant_unregistered`
     ///
     /// **Topics**: `(Symbol("merchant_unregistered"), Address merchant)`
     /// - First topic: fixed event-name symbol for filtering by event type
@@ -513,8 +523,13 @@ impl SettlementContract {
         env.storage().persistent().remove(&key);
 
         let rule_key = DataKey::Rule(merchant.clone());
-        if env.storage().persistent().has(&rule_key) {
+        let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
+        if old_rule.is_some() {
             env.storage().persistent().remove(&rule_key);
+            env.events().publish(
+                (Symbol::new(&env, "settlement_rule_cleared"), merchant.clone()),
+                (admin.clone(), old_rule.unwrap()),
+            );
         }
 
         env.events().publish(
@@ -1656,7 +1671,7 @@ mod tests {
 
     #[test]
     fn unregisters_merchant_and_cleans_up() {
-        let (env, client, _admin, merchant) = setup();
+        let (env, client, admin, merchant) = setup();
         client.register_merchant(&merchant);
 
         let rule = SettlementRule {
@@ -1675,7 +1690,20 @@ mod tests {
 
         assert!(!client.is_merchant_registered(&merchant));
         assert!(client.get_settlement_rule(&merchant).is_none());
-        assert!(env.events().all().len() > before);
+        // Two events: settlement_rule_cleared then merchant_unregistered
+        assert_eq!(env.events().all().len(), before + 2);
+
+        let events = env.events().all();
+        let (_, topics, data) = events.get(before).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "settlement_rule_cleared")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), merchant);
+        let (event_admin, removed): (Address, SettlementRule) = data;
+        assert_eq!(event_admin, admin);
+        assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
+        assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
     }
 
     #[test]
