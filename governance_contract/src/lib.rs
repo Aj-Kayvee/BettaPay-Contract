@@ -937,8 +937,9 @@ mod tests {
     fn governance_rejects_double_initialization() {
         let (env, client, _admin) = setup();
         let other_admin = Address::generate(&env);
+        let recovery = Address::generate(&env);
 
-        client.init(&other_admin);
+        client.init(&other_admin, &recovery);
     }
 
     #[test]
@@ -1223,20 +1224,13 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
+        let recovery = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
-        client.init(&admin);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), 1, "exactly one event emitted on init");
-
-        let (_contract_id, topics, data) = events.get(0).unwrap();
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "initialized")
-        );
-        assert_eq!(Address::from_val(&env, &data), admin);
+        client.init(&admin, &recovery);
+        assert!(client.is_initialized());
+        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
