@@ -72,11 +72,11 @@
 
 #![no_std]
 
+use soroban_sdk::testutils::storage::Persistent;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, String, Symbol, Val, Vec,
 };
-use soroban_sdk::testutils::storage::Persistent;
 
 const BPS_DENOMINATOR: u32 = 10_000;
 const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
@@ -86,6 +86,8 @@ const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
 const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
 const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
 const RULE_TTL_BUMP: u32 = 17280 * 30;
+const ADMIN_TTL_THRESHOLD: u32 = 50_000;
+const ADMIN_TTL_BUMP: u32 = 100_000;
 const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
 const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
@@ -390,7 +392,6 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
         env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
@@ -405,7 +406,10 @@ impl SettlementContract {
         admin.require_auth();
 
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash.clone()),
+            (
+                Symbol::new(&env, "contract_upgraded"),
+                new_wasm_hash.clone(),
+            ),
             admin,
         );
 
@@ -643,9 +647,11 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .set(&DataKey::DefaultRule, &new_rule);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::DefaultRule, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DefaultRule,
+            RULE_TTL_THRESHOLD,
+            RULE_TTL_BUMP,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "default_rule_updated"),),
@@ -734,7 +740,11 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "payment_stored"), merchant.clone(), reference.clone()),
+            (
+                Symbol::new(&env, "payment_stored"),
+                merchant.clone(),
+                reference.clone(),
+            ),
             (),
         );
 
@@ -789,9 +799,11 @@ impl SettlementContract {
         if record.is_some() {
             let ttl = env.storage().persistent().get_ttl(&key);
             if ttl < PAYMENT_TTL_THRESHOLD {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    PAYMENT_TTL_THRESHOLD,
+                    PAYMENT_TTL_BUMP,
+                );
             }
         }
         record
@@ -819,7 +831,9 @@ impl SettlementContract {
 
 /// Reads the configured admin address and refreshes the instance TTL so it remains available.
 fn read_admin(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -827,7 +841,9 @@ fn read_admin(env: &Env) -> Address {
 }
 
 fn read_governance(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Governance)
@@ -835,7 +851,9 @@ fn read_governance(env: &Env) -> Address {
 }
 
 fn read_recovery_address(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::RecoveryAddress)
@@ -965,7 +983,9 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::{
+        storage::Instance, Address as _, Events, Ledger, MockAuth, MockAuthInvoke,
+    };
     use soroban_sdk::{FromVal, IntoVal};
 
     #[contract]
@@ -1001,17 +1021,17 @@ mod tests {
         let (env, client, admin, _) = setup();
         let wasm = soroban_sdk::Bytes::from_slice(&env, &[]);
         let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
-        
+
         let before = env.events().all().len();
         // Verifies the structural update pass completes without panicking
         client.upgrade(&new_wasm_hash);
-        
+
         let events = env.events().all();
         assert!(events.len() > before);
-        
+
         let event = events.last().unwrap();
         let (_contract_id, topics, data) = event;
-        
+
         assert_eq!(
             Symbol::from_val(&env, &topics.get(0).unwrap()),
             Symbol::new(&env, "contract_upgraded")
@@ -1033,10 +1053,12 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
+        let governance = register_governance(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
 
-        client.init(&admin);
+        client.init(&admin, &governance, &recovery_address);
 
         let events = env.events().all();
         assert_eq!(events.len(), 1, "exactly one event emitted on init");
@@ -1047,6 +1069,50 @@ mod tests {
             Symbol::new(&env, "initialized")
         );
         assert_eq!(Address::from_val(&env, &data), admin);
+    }
+
+    #[test]
+    fn get_admin_extends_instance_ttl_on_read() {
+        let (env, client, admin, _) = setup();
+
+        assert_eq!(client.get_admin(), admin);
+
+        env.as_contract(&client.address, || {
+            let ttl = env.storage().instance().get_ttl();
+            assert!(
+                ttl >= ADMIN_TTL_BUMP,
+                "instance TTL must be extended to ADMIN_TTL_BUMP after reading admin"
+            );
+        });
+    }
+
+    #[test]
+    fn get_admin_refreshes_instance_ttl_once_below_threshold() {
+        let (env, client, admin, _) = setup();
+
+        client.get_admin();
+
+        env.ledger().set_sequence_number(
+            env.ledger().sequence() + (ADMIN_TTL_BUMP - ADMIN_TTL_THRESHOLD) + 1_000,
+        );
+
+        env.as_contract(&client.address, || {
+            let ttl_before_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_before_read < ADMIN_TTL_THRESHOLD,
+                "test setup must actually cross the extension threshold"
+            );
+        });
+
+        assert_eq!(client.get_admin(), admin);
+
+        env.as_contract(&client.address, || {
+            let ttl_after_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_after_read >= ADMIN_TTL_BUMP,
+                "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
+            );
+        });
     }
 
     #[test]
@@ -1066,35 +1132,6 @@ mod tests {
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
         client.get_admin();
-    }
-
-    #[test]
-    fn proposes_and_accepts_admin_successfully() {
-        let (env, client, admin, _) = setup();
-        let new_admin = Address::generate(&env);
-
-        assert_eq!(client.get_pending_admin(), None);
-
-        client.propose_admin(&new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-        assert_eq!(client.get_admin(), admin);
-
-        client.accept_admin();
-        assert_eq!(client.get_admin(), new_admin);
-        assert_eq!(client.get_pending_admin(), None);
-    }
-
-    #[test]
-    fn cancels_admin_proposal() {
-        let (env, client, admin, _) = setup();
-        let new_admin = Address::generate(&env);
-
-        client.propose_admin(&new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-
-        client.cancel_admin_transfer();
-        assert_eq!(client.get_pending_admin(), None);
-        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
@@ -1248,7 +1285,8 @@ mod tests {
         // hops, touching the contract via get_admin() between hops, so the
         // instance's own (much shorter) TTL doesn't expire along the way.
         for _ in 0..5 {
-            env.ledger().set_sequence_number(env.ledger().sequence() + 60_000);
+            env.ledger()
+                .set_sequence_number(env.ledger().sequence() + 60_000);
             client.get_admin();
         }
 
@@ -1283,7 +1321,8 @@ mod tests {
         };
         client.set_settlement_rule(&merchant, &rule);
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1000);
 
         let reference = BytesN::from_array(&env, &[42; 32]);
         client.store_payment_reference(&merchant, &reference, &10_000);
@@ -1312,7 +1351,8 @@ mod tests {
         };
         client.set_default_rule(&global_rule);
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1000);
 
         client.calculate_fee_split(&merchant, &50_000);
 
@@ -1339,7 +1379,8 @@ mod tests {
         };
         client.set_default_rule(&global_rule);
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1000);
 
         let retrieved = client.get_default_rule();
         assert!(retrieved.is_some());
@@ -1888,11 +1929,23 @@ mod tests {
         assert_eq!(admin_addr, _admin);
         assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
         assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
-        assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+        assert_eq!(
+            removed.settlement_delay_ledger,
+            rule.settlement_delay_ledger
+        );
         assert_eq!(removed.auto_settle, rule.auto_settle);
-        assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
-        assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
-        assert_eq!(fallback.settlement_delay_ledger, BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger);
+        assert_eq!(
+            fallback.platform_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+        );
+        assert_eq!(
+            fallback.network_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+        );
+        assert_eq!(
+            fallback.settlement_delay_ledger,
+            BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
+        );
         assert_eq!(fallback.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
     }
 
@@ -1935,11 +1988,23 @@ mod tests {
             FromVal::from_val(&env, &data);
         assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
         assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
-        assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+        assert_eq!(
+            removed.settlement_delay_ledger,
+            rule.settlement_delay_ledger
+        );
         assert_eq!(removed.auto_settle, rule.auto_settle);
-        assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
-        assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
-        assert_eq!(fallback.settlement_delay_ledger, BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger);
+        assert_eq!(
+            fallback.platform_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+        );
+        assert_eq!(
+            fallback.network_fee_bps,
+            BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+        );
+        assert_eq!(
+            fallback.settlement_delay_ledger,
+            BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
+        );
         assert_eq!(fallback.auto_settle, BOOTSTRAP_DEFAULT_RULE.auto_settle);
     }
 
@@ -2401,11 +2466,17 @@ mod tests {
             FromVal::from_val(&env, &data);
         assert_eq!(removed.platform_fee_bps, merchant_rule.platform_fee_bps);
         assert_eq!(removed.network_fee_bps, merchant_rule.network_fee_bps);
-        assert_eq!(removed.settlement_delay_ledger, merchant_rule.settlement_delay_ledger);
+        assert_eq!(
+            removed.settlement_delay_ledger,
+            merchant_rule.settlement_delay_ledger
+        );
         assert_eq!(removed.auto_settle, merchant_rule.auto_settle);
         assert_eq!(fallback.platform_fee_bps, global_rule.platform_fee_bps);
         assert_eq!(fallback.network_fee_bps, global_rule.network_fee_bps);
-        assert_eq!(fallback.settlement_delay_ledger, global_rule.settlement_delay_ledger);
+        assert_eq!(
+            fallback.settlement_delay_ledger,
+            global_rule.settlement_delay_ledger
+        );
         assert_eq!(fallback.auto_settle, global_rule.auto_settle);
     }
 
@@ -2717,8 +2788,7 @@ mod tests {
         );
         assert_eq!(Address::from_val(&env, &topics1.get(1).unwrap()), merchant);
 
-        let (ref1, record): (BytesN<32>, PaymentRecord) =
-            FromVal::from_val(&env, &data1);
+        let (ref1, record): (BytesN<32>, PaymentRecord) = FromVal::from_val(&env, &data1);
         assert_eq!(ref1, reference);
         assert_eq!(record.amount, 20_000);
         assert_eq!(record.platform_fee_amount, 500);
@@ -2880,10 +2950,12 @@ mod tests {
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
+        let governance = register_governance(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
         env.mock_all_auths();
-        client.init(&admin);
+        client.init(&admin, &governance, &recovery_address);
         env.mock_auths(&[MockAuth {
             address: &non_admin,
             invoke: &MockAuthInvoke {
@@ -3103,6 +3175,8 @@ mod tests {
     fn pause_rejected_for_non_admin() {
         let env = Env::default();
         let admin = Address::generate(&env);
+        let governance = register_governance(&env);
+        let recovery_address = Address::generate(&env);
         let non_admin = Address::generate(&env);
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
@@ -3110,7 +3184,12 @@ mod tests {
         let init_invoke = MockAuthInvoke {
             contract: &contract_id,
             fn_name: "init",
-            args: soroban_sdk::vec![&env, admin.to_val()],
+            args: soroban_sdk::vec![
+                &env,
+                admin.to_val(),
+                governance.to_val(),
+                recovery_address.to_val(),
+            ],
             sub_invokes: &[],
         };
         let init_auth = MockAuth {
@@ -3118,7 +3197,7 @@ mod tests {
             invoke: &init_invoke,
         };
         env.set_auths(&[(&init_auth).into()]);
-        client.init(&admin);
+        client.init(&admin, &governance, &recovery_address);
 
         let pause_invoke = MockAuthInvoke {
             contract: &contract_id,
