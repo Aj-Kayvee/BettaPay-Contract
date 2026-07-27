@@ -215,6 +215,8 @@ pub enum SettlementError {
     InvalidRecoveryAddress = 16,
     RecoveryNotPending = 17,
     RecoveryDelayActive = 18,
+    GovernanceCallFailed = 19,
+    FeeExceedsGovernanceConfig = 20,
 }
 
 #[contract]
@@ -512,6 +514,8 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidSettlementDelay);
         }
 
+        validate_fee_against_governance(&env, &rule);
+
         let prev = env
             .storage()
             .persistent()
@@ -587,6 +591,8 @@ impl SettlementContract {
         if new_rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
             panic_with_error!(&env, SettlementError::InvalidSettlementDelay);
         }
+
+        validate_fee_against_governance(&env, &new_rule);
 
         let prev = env
             .storage()
@@ -877,6 +883,33 @@ fn assert_not_paused(env: &Env) {
     }
 }
 
+/// Fetches the fee configuration from the governance contract and validates
+/// that the given settlement rule fees fall within governance's constraints.
+///
+/// If governance has not set a fee config (returns `None`), the rule is
+/// accepted — the local hardcoded constants in `set_settlement_rule` and
+/// `set_default_rule` still apply as a baseline.
+///
+/// If governance has set a config, the rule's fees must not exceed
+/// governance's platform and network fee ceilings.
+fn validate_fee_against_governance(env: &Env, rule: &SettlementRule) {
+    let governance = read_governance(env);
+    let args: Vec<Val> = Vec::new(env);
+    let fee_config: Option<FeeConfig> =
+        env.invoke_contract(&governance, &Symbol::new(env, "get_fee_config"), args);
+
+    let fee_config = match fee_config {
+        Some(c) => c,
+        None => return, // Governance hasn't set constraints yet, allow anything within local limits
+    };
+
+    if rule.platform_fee_bps > fee_config.platform_fee_bps
+        || rule.network_fee_bps > fee_config.network_fee_bps
+    {
+        panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
+    }
+}
+
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
 fn calculate_split(amount: i128, rule: &SettlementRule) -> FeeSplit {
     // Integer arithmetic is used instead of floats to ensure deterministic, reproducible smart contract execution.
@@ -911,9 +944,19 @@ mod tests {
 
     #[contractimpl]
     impl MockGovernance {
-        pub fn get_fee_config(_env: Env) -> Option<FeeConfig> {
-            None
+        pub fn get_fee_config(env: Env) -> Option<FeeConfig> {
+            env.storage().instance().get(&MockDataKey::FeeConfig)
         }
+
+        pub fn set_fee_config(env: Env, config: FeeConfig) {
+            env.storage().instance().set(&MockDataKey::FeeConfig, &config);
+        }
+    }
+
+    #[derive(Clone)]
+    #[contracttype]
+    enum MockDataKey {
+        FeeConfig,
     }
 
     fn register_governance(env: &Env) -> Address {
@@ -2693,7 +2736,6 @@ mod tests {
         assert_eq!(split.network_fee_amount, 0);
         assert_eq!(split.merchant_amount, 9_900);
     }
-}
 
     // Issue #72: verify non-admin transfer_admin calls are rejected
     #[test]
@@ -2916,5 +2958,132 @@ mod tests {
             Symbol::new(&env, "admin")
         );
         assert_eq!(Address::from_val(&env, &data), new_admin);
+    }
+
+    fn setup_with_governance_fee(
+        platform_fee_bps: u32,
+        network_fee_bps: u32,
+    ) -> (Env, SettlementContractClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let governance = register_governance(&env);
+        let contract_id = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+        client.init(&admin, &governance, &recovery_address);
+
+        let gov_client = MockGovernanceClient::new(&env, &governance);
+        gov_client.set_fee_config(&FeeConfig {
+            platform_fee_bps,
+            network_fee_bps,
+        });
+
+        (env, client, admin, merchant, governance)
+    }
+
+    #[test]
+    fn set_settlement_rule_respects_governance_fee上限() {
+        let (env, client, _admin, merchant, _) = setup_with_governance_fee(200, 100);
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 150,
+            network_fee_bps: 80,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let got = client.get_settlement_rule(&merchant).unwrap();
+        assert_eq!(got.platform_fee_bps, 150);
+        assert_eq!(got.network_fee_bps, 80);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #20)")]
+    fn set_settlement_rule_rejects_platform_fee_above_governance() {
+        let (env, client, _admin, merchant, _) = setup_with_governance_fee(200, 100);
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 250, // exceeds governance 200
+            network_fee_bps: 50,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #20)")]
+    fn set_settlement_rule_rejects_network_fee_above_governance() {
+        let (env, client, _admin, merchant, _) = setup_with_governance_fee(200, 100);
+        client.register_merchant(&merchant);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 100,
+            network_fee_bps: 150, // exceeds governance 100
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+    }
+
+    #[test]
+    fn set_default_rule_respects_governance_fee上限() {
+        let (env, client, _admin, _merchant, _) = setup_with_governance_fee(300, 150);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 250,
+            network_fee_bps: 100,
+            settlement_delay_ledger: 5,
+            auto_settle: true,
+        };
+        client.set_default_rule(&rule);
+        let got = client.get_default_rule().unwrap();
+        assert_eq!(got.platform_fee_bps, 250);
+        assert_eq!(got.network_fee_bps, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #20)")]
+    fn set_default_rule_rejects_fee_above_governance() {
+        let (env, client, _admin, _merchant, _) = setup_with_governance_fee(300, 150);
+
+        let rule = SettlementRule {
+            platform_fee_bps: 350, // exceeds governance 300
+            network_fee_bps: 100,
+            settlement_delay_ledger: 5,
+            auto_settle: true,
+        };
+        client.set_default_rule(&rule);
+    }
+
+    #[test]
+    fn allows_rule_when_governance_has_no_fee_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let governance = register_governance(&env);
+        let contract_id = env.register_contract(None, SettlementContract);
+        let client = SettlementContractClient::new(&env, &contract_id);
+        client.init(&admin, &governance, &recovery_address);
+        client.register_merchant(&merchant);
+
+        // MockGovernance starts with no FeeConfig, so governance returns None
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 200,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let got = client.get_settlement_rule(&merchant).unwrap();
+        assert_eq!(got.platform_fee_bps, 500);
     }
 }
