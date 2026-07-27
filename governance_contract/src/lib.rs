@@ -21,6 +21,28 @@
 //! code takes over immediately; if a storage-schema migration is needed, a
 //! separate migration function should be invoked in the same transaction.
 //!
+//! ### Upgrade Process
+//! `upgrade` is safe because it ignores storage, which is also why changing a
+//! stored type is a separate problem. Nothing converts existing entries, and
+//! nothing checks that they still match the types the new code expects — a
+//! mismatched read fails at runtime, after the upgrade has landed.
+//!
+//! 1. Wasm upgrades replace code only; every storage entry survives untouched.
+//! 2. Storage migrations run **inside the upgraded contract**, as an
+//!    admin-gated `migrate` entry point — not from a separate migration
+//!    contract. A contract can only reach its own storage, so another contract
+//!    has no access path to these entries.
+//! 3. Ship the old type definition in the same Wasm as the new one. It is what
+//!    makes existing entries readable while they are converted.
+//! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
+//!    post-upgrade state, then remove the migration code in a later upgrade.
+//! 5. `Anchor(Address)` and `SystemParam(Symbol)` are keyed by value and
+//!    Soroban cannot enumerate storage keys, so those cannot be migrated by
+//!    iteration. Convert them lazily on read, or pass the keys in explicitly.
+//!
+//! Full guidance, including worked examples and the TTL hazards, is in
+//! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
+//!
 //! ### Pause / Unpause
 //! The admin can halt all mutating governance operations by calling
 //! [`GovernanceContract::pause`]. This sets a boolean flag in instance storage
@@ -85,6 +107,15 @@
 //! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
 //! | `anchor_removed` | Anchor removed for an asset |
 
+// TODO: Refactor flat file structure into modular hierarchy (Issue #84)
+// Intended module structure:
+// - mod types: Data structures (enums, structs)
+// - mod storage: DataKey and storage access helpers
+// - mod events: Event definitions and emission helpers
+// - mod errors: Error enums
+// - mod contract: Main contract trait implementation
+// - mod test: Unit and integration tests
+
 #![no_std]
 
 use soroban_sdk::{
@@ -133,16 +164,39 @@ pub struct PendingRecovery {
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    /// Storage key for the contract admin address in instance storage.
+    /// Storage key for the contract admin address.
+    /// Uses instance storage because access control needs to share the contract's lifetime
+    /// and requires fast, guaranteed access on almost every privileged invocation.
     Admin,
+    
+    /// Storage key for the recovery address that can reset the admin.
+    /// Uses instance storage because it's a core access control mechanism
+    /// that shares the contract's lifetime.
     RecoveryAddress,
+    
+    /// Storage key for the pending recovery operation.
+    /// Uses instance storage because it's temporary access control state
+    /// tied directly to the contract instance.
     PendingRecovery,
+    
+    /// Storage key for arbitrary system parameters.
+    /// Uses persistent storage because there may be an unbounded number of parameters
+    /// that require independent rent management.
     SystemParam(Symbol),
-    /// Storage key for the fee configuration data in persistent storage.
+    
+    /// Storage key for the fee configuration data.
+    /// Uses persistent storage because fee parameters don't need to block instance
+    /// execution if they expire, and they can be managed via separate rent lifecycles.
     FeeConfig,
-    /// Storage key for the anchor address associated with a specific asset in persistent storage.
+    
+    /// Storage key for the anchor address associated with a specific asset.
+    /// Uses persistent storage because the number of supported assets can grow indefinitely,
+    /// so each anchor must manage its own rent rather than bloating the instance storage.
     Anchor(Address),
-    /// Storage key for the pause state flag in instance storage.
+    
+    /// Storage key for the pause state flag.
+    /// Uses instance storage because the pause state dictates whether the contract
+    /// functions at all, needing cheap, guaranteed access just like the Admin key.
     Paused,
 }
 
@@ -168,6 +222,10 @@ pub enum GovernanceError {
     InvalidRecoveryAddress = 9,
     RecoveryNotPending = 10,
     RecoveryDelayActive = 11,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused = 12,
+    /// `unpause` was called while the contract was already unpaused.
+    AlreadyUnpaused = 13,
 }
 
 #[contract]
@@ -389,12 +447,16 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
+    /// Panics with `GovernanceError::AlreadyPaused` if the contract is already paused.
     pub fn pause(env: Env, caller: Address) {
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
+        if is_paused(&env) {
+            panic_with_error!(&env, GovernanceError::AlreadyPaused);
+        }
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
             .publish((Symbol::new(&env, "paused"),), (admin, true));
@@ -420,12 +482,16 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
+    /// Panics with `GovernanceError::AlreadyUnpaused` if the contract is not currently paused.
     pub fn unpause(env: Env, caller: Address) {
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
+        if !is_paused(&env) {
+            panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
+        }
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((Symbol::new(&env, "unpaused"),), (admin, false));
@@ -450,6 +516,10 @@ impl GovernanceContract {
     /// System parameters are arbitrary `i128` values keyed by a `Symbol` and are
     /// intended for protocol-level configuration such as settlement delay bounds.
     ///
+    /// This function is intentionally exempt from the pause guard. When a
+    /// contract is paused, administrators must still be able to update system
+    /// parameters to resolve the underlying emergency that caused the pause.
+    ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
@@ -469,8 +539,8 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     /// Panics with `GovernanceError::InvalidParamValue` if `key` exceeds 32 bytes.
+    /// Panics with `GovernanceError::InvalidParamValue` if `value` is negative.
     pub fn update_system_param(env: Env, caller: Address, key: Symbol, value: i128) {
         if key.to_string().len() > 32 {
             panic_with_error!(&env, GovernanceError::InvalidParamValue);
@@ -851,12 +921,36 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #2)")]
-    fn get_admin_panics_before_init() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        client.get_admin();
+    fn executes_contract_wasm_upgrade_successfully() {
+        let (env, client, admin) = setup();
+        let new_wasm_hash = upload_test_wasm(&env);
+
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Ensure the upgraded contract remains callable and retains its state.
+        let upgraded_client = GovernanceContractClient::new(&env, &client.address);
+        assert_eq!(upgraded_client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1)")]
+    fn governance_rejects_double_initialization() {
+        let (env, client, _admin) = setup();
+        let other_admin = Address::generate(&env);
+
+        client.init(&other_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn governance_rejects_zero_address_admin_transfer() {
+        let (env, client, admin) = setup();
+        let zero_address = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+
+        client.transfer_admin(&admin, &zero_address);
     }
 
     #[test]
@@ -1191,11 +1285,57 @@ mod tests {
     }
 
     #[test]
-    fn recovery_executes_after_delay() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let recovery_address = Address::generate(&env);
+    fn get_admin_extends_instance_ttl_on_read() {
+        let (env, client, admin) = setup();
+
+        assert_eq!(client.get_admin(), admin);
+
+        env.as_contract(&client.address, || {
+            let ttl = env.storage().instance().get_ttl();
+            assert!(
+                ttl >= ADMIN_TTL_BUMP,
+                "instance TTL must be extended to ADMIN_TTL_BUMP after reading admin"
+            );
+        });
+    }
+
+    #[test]
+    fn get_admin_refreshes_instance_ttl_once_below_threshold() {
+        let (env, client, admin) = setup();
+
+        // First read establishes a full ADMIN_TTL_BUMP remaining TTL.
+        client.get_admin();
+
+        // Advance the ledger so the remaining TTL drops below ADMIN_TTL_THRESHOLD,
+        // which is required for extend_ttl to actually re-trigger on the next read.
+        env.ledger().set_sequence_number(
+            env.ledger().sequence() + (ADMIN_TTL_BUMP - ADMIN_TTL_THRESHOLD) + 1_000,
+        );
+
+        env.as_contract(&client.address, || {
+            let ttl_before_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_before_read < ADMIN_TTL_THRESHOLD,
+                "test setup must actually cross the extension threshold"
+            );
+        });
+
+        assert_eq!(client.get_admin(), admin);
+
+        // get_ttl() reports the remaining ledger count, not an absolute sequence
+        // number, so a freshly re-extended entry settles back at ADMIN_TTL_BUMP.
+        env.as_contract(&client.address, || {
+            let ttl_after_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_after_read >= ADMIN_TTL_BUMP,
+                "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
+            );
+        });
+    }
+
+    #[test]
+    fn proposes_and_accepts_admin_successfully_in_governance() {
+        let (env, client, admin) = setup();
         let new_admin = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
@@ -1371,5 +1511,41 @@ mod tests {
         let non_admin = Address::generate(&env);
         let key = Symbol::new(&env, "max_settle");
         client.update_system_param(&non_admin, &key, &1440);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #12)")]
+    fn pause_rejects_when_already_paused() {
+        let (_env, client, admin) = setup();
+        client.pause(&admin);
+        assert!(client.is_paused());
+        // Pausing again should be rejected instead of emitting a redundant event.
+        client.pause(&admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #13)")]
+    fn unpause_rejects_when_already_unpaused() {
+        let (_env, client, admin) = setup();
+        assert!(!client.is_paused());
+        // Contract starts unpaused; unpausing again should be rejected.
+        client.unpause(&admin);
+    }
+
+    #[test]
+    fn pause_then_unpause_round_trip_succeeds() {
+        let (env, client, admin) = setup();
+
+        assert!(!client.is_paused());
+
+        let before_pause = env.events().all().len();
+        client.pause(&admin);
+        assert!(client.is_paused());
+        assert!(env.events().all().len() > before_pause);
+
+        let before_unpause = env.events().all().len();
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+        assert!(env.events().all().len() > before_unpause);
     }
 }

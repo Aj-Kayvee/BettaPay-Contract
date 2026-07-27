@@ -26,11 +26,49 @@
 //! - The calculated amounts and fee BPS.
 //! - The ledger sequence of the transaction.
 //! - Settlement delay and auto-settle configurations.
-//! - The associated merchant address.
 //!
 //! The contract leverages different `DataKey` variants (`Admin`, `Merchant`, `Rule`, `Payment`, etc.)
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
+//!
+//! ## Upgrade Process
+//!
+//! [`SettlementContract::upgrade`] replaces the Wasm and nothing else. That is
+//! what makes it safe, and also why changing a stored type is a separate
+//! problem: nothing converts existing entries, and nothing checks that they
+//! still match the types the new code expects. A mismatched read fails at
+//! runtime, after the upgrade has already landed.
+//!
+//! 1. Wasm upgrades replace code only; every storage entry survives untouched.
+//! 2. Storage migrations run **inside the upgraded contract**, as an
+//!    admin-gated `migrate` entry point — not from a separate migration
+//!    contract. A contract can only reach its own storage, so another contract
+//!    has no access path to `Payment`, `Merchant` or `Rule` entries.
+//! 3. Ship the old type definition in the same Wasm as the new one. A
+//!    `#[contracttype]` struct is encoded by field name, so a `PaymentRecord`
+//!    written before a new field existed will not deserialise into the new
+//!    struct — the old type is what keeps those entries readable.
+//! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
+//!    post-upgrade state, then remove the migration code in a later upgrade.
+//! 5. `Payment(BytesN<32>)`, `Merchant(Address)` and `Rule(Address)` are keyed
+//!    by value and Soroban cannot enumerate storage keys — which is why
+//!    [`SettlementContract::get_payments`] takes the references from the
+//!    caller. Convert these lazily on read, or pass the keys in explicitly.
+//! 6. Call `extend_ttl` on anything the migration rewrites: `set` alone does
+//!    not extend an entry's life, so a migrated record would otherwise expire
+//!    sooner than an untouched one.
+//!
+//! Full guidance, including worked examples and how to test a migration, is in
+//! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
+
+// TODO: Refactor flat file structure into modular hierarchy (Issue #84)
+// Intended module structure:
+// - mod types: Data structures (enums, structs)
+// - mod storage: DataKey and storage access helpers
+// - mod events: Event definitions and emission helpers
+// - mod errors: Error enums
+// - mod contract: Main contract trait implementation
+// - mod test: Unit and integration tests
 
 #![no_std]
 
@@ -95,7 +133,7 @@ pub struct SettlementRule {
 #[contracttype]
 pub struct FeeSplit {
     /// The total gross amount of the payment before any fees are deducted.
-    /// This is an absolute amount provided as input when storing a payment.
+    /// Mirrors the input amount for caller convenience — not independently meaningful.
     pub gross_amount: i128,
     /// Portion of the settlement fee allocated to the platform.
     /// This amount is calculated by applying the platform fee basis points to the gross amount.
@@ -111,9 +149,6 @@ pub struct FeeSplit {
 #[derive(Clone)]
 #[contracttype]
 pub struct PaymentRecord {
-    /// The address of the merchant receiving the payment.
-    /// Set when the payment reference is stored, used to determine who is authorized to settle.
-    pub merchant: Address,
     /// The total gross amount of the payment processed.
     /// Set upon payment creation and used to derive the fee split.
     pub amount: i128,
@@ -217,6 +252,10 @@ pub enum SettlementError {
     InvalidRecoveryAddress = 16,
     RecoveryNotPending = 17,
     RecoveryDelayActive = 18,
+    /// The payment amount is large enough that multiplying it by a fee's
+    /// basis points would overflow `i128`. Raised by `calculate_split`
+    /// before the multiplication is attempted.
+    AmountOverflow = 19,
 }
 
 #[contract]
@@ -640,6 +679,7 @@ impl SettlementContract {
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
     /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
     /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
+    /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     ///
     /// ## Emitted Event: `payment_stored`
     ///
@@ -674,9 +714,8 @@ impl SettlementContract {
         }
 
         let rule = read_rule_or_default(&env, merchant.clone());
-        let split = calculate_split(amount, &rule);
+        let split = calculate_split(&env, amount, &rule);
         let record = PaymentRecord {
-            merchant: merchant.clone(),
             amount,
             platform_fee_amount: split.platform_fee_amount,
             network_fee_amount: split.network_fee_amount,
@@ -732,6 +771,7 @@ impl SettlementContract {
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -740,7 +780,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAmount);
         }
         let rule = read_rule_or_default(&env, merchant);
-        calculate_split(amount, &rule)
+        calculate_split(&env, amount, &rule)
     }
 
     /// Retrieve a payment record by its reference, extending the storage TTL if found.
@@ -762,6 +802,10 @@ impl SettlementContract {
     ///
     /// Missing references are silently skipped.
     pub fn get_payments(env: Env, references: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
+        // `references.len()` is known upfront, so pre-allocating would avoid repeated
+        // reallocation as this vector grows. soroban-sdk 21.7.7's Vec<T> has no
+        // `with_capacity` constructor (only `new`, `from_array`, `from_slice`), so
+        // this is left as a potential optimization for a future SDK version.
         let mut payments = Vec::new(&env);
 
         for reference in references.iter() {
@@ -886,12 +930,23 @@ fn assert_not_paused(env: &Env) {
 }
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
-fn calculate_split(amount: i128, rule: &SettlementRule) -> FeeSplit {
+fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
+    let denom = BPS_DENOMINATOR as i128;
+
+    // Guard against `amount * bps + (denom - 1)` overflowing i128 before it is attempted below,
+    // so callers get a readable AmountOverflow error instead of a raw arithmetic-overflow panic.
+    // The `denom - 1` term (the ceil-rounding adjustment) is subtracted from the budget up front
+    // so the check stays exact at the boundary instead of leaving a narrow window where the
+    // multiplication is "safe" but the following `+ denom - 1` still overflows.
+    let max_bps = core::cmp::max(rule.platform_fee_bps, rule.network_fee_bps) as i128;
+    if max_bps > 0 && amount > (i128::MAX - (denom - 1)) / max_bps {
+        panic_with_error!(env, SettlementError::AmountOverflow);
+    }
+
     // Integer arithmetic is used instead of floats to ensure deterministic, reproducible smart contract execution.
     // Standard integer division (`/`) truncates fractions toward zero, causing precision loss and under-collecting fees.
     // To prevent fee under-collection, ceiling division is simulated by adding `BPS_DENOMINATOR - 1` to the numerator.
     // Edge case: For small amounts, ceil rounding can force fees to 1 unit even when the basis points represent a tiny fraction.
-    let denom = BPS_DENOMINATOR as i128;
     let platform_fee_amount = (amount * (rule.platform_fee_bps as i128) + denom - 1) / denom;
     let network_fee_amount = (amount * (rule.network_fee_bps as i128) + denom - 1) / denom;
 
@@ -967,6 +1022,10 @@ mod tests {
             new_wasm_hash
         );
         assert_eq!(Address::from_val(&env, &data), admin);
+
+        // Ensure the upgraded contract remains callable and retains its state.
+        let upgraded_client = SettlementContractClient::new(&env, &client.address);
+        assert_eq!(upgraded_client.get_admin(), admin);
     }
 
     #[test]
@@ -1164,6 +1223,50 @@ mod tests {
             assert!(
                 ttl >= env.ledger().sequence() + RULE_TTL_BUMP,
                 "TTL must be extended to at least ledger + RULE_TTL_BUMP"
+            );
+        });
+    }
+
+    // Issue #252: the TTL must be refreshed on every write to the default rule,
+    // not just the first one — otherwise a rarely-updated (but frequently-read)
+    // default rule could still expire between updates.
+    #[test]
+    fn set_default_rule_extends_ttl_on_update() {
+        let (env, client, _admin, _merchant) = setup();
+
+        let first_rule = SettlementRule {
+            platform_fee_bps: 300,
+            network_fee_bps: 100,
+            settlement_delay_ledger: 5,
+            auto_settle: true,
+        };
+        client.set_default_rule(&first_rule);
+
+        // Advance the ledger past RULE_TTL_THRESHOLD so the remaining TTL from
+        // the first call drops below the threshold and a second write is
+        // actually required to bump it back up (extend_ttl is a no-op while
+        // the remaining TTL is still above the threshold). Advance in smaller
+        // hops, touching the contract via get_admin() between hops, so the
+        // instance's own (much shorter) TTL doesn't expire along the way.
+        for _ in 0..5 {
+            env.ledger().set_sequence_number(env.ledger().sequence() + 60_000);
+            client.get_admin();
+        }
+
+        let second_rule = SettlementRule {
+            platform_fee_bps: 400,
+            network_fee_bps: 150,
+            settlement_delay_ledger: 10,
+            auto_settle: false,
+        };
+        client.set_default_rule(&second_rule);
+
+        env.as_contract(&client.address, || {
+            let key = DataKey::DefaultRule;
+            let ttl = env.storage().persistent().get_ttl(&key);
+            assert!(
+                ttl >= RULE_TTL_BUMP,
+                "TTL must be refreshed to at least RULE_TTL_BUMP on every write, not just the first"
             );
         });
     }
@@ -1492,6 +1595,34 @@ mod tests {
         assert_eq!(payments.get(1).unwrap().amount, 20_000);
     }
 
+    // Issue #340: get_payments must still return every requested payment, in the
+    // requested order, for a batch large enough to trigger multiple Vec growths
+    // (regardless of whether the underlying Vec is pre-allocated).
+    #[test]
+    fn get_payments_returns_all_records_in_order_for_large_batch() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        const BATCH_SIZE: u8 = 20;
+        let mut references = Vec::new(&env);
+        for i in 1..=BATCH_SIZE {
+            let reference = BytesN::from_array(&env, &[i; 32]);
+            let amount = MIN_PAYMENT_AMOUNT + i as i128;
+            client.store_payment_reference(&merchant, &reference, &amount);
+            references.push_back(reference);
+        }
+
+        let payments = client.get_payments(&references);
+
+        assert_eq!(payments.len(), BATCH_SIZE as u32);
+        for i in 1..=BATCH_SIZE {
+            assert_eq!(
+                payments.get((i - 1) as u32).unwrap().amount,
+                MIN_PAYMENT_AMOUNT + i as i128
+            );
+        }
+    }
+
     #[test]
     fn calculates_split_without_storing_reference() {
         let (_env, client, _admin, merchant) = setup();
@@ -1668,6 +1799,20 @@ mod tests {
         client.register_merchant(&merchant);
         let bad_rule = SettlementRule {
             platform_fee_bps: 10_001,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &bad_rule);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rejects_settlement_rule_below_governance_min_fee() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let bad_rule = SettlementRule {
+            platform_fee_bps: 4,
             network_fee_bps: 0,
             settlement_delay_ledger: 0,
             auto_settle: false,
@@ -2348,6 +2493,9 @@ mod tests {
 
     #[test]
     fn settlement_min_fee_matches_governance_min_fee() {
+        // Both contracts must enforce the same minimum fee of 5 bps.
+        // Governance rejects fee configs with any value below 5 bps,
+        // and settlement rejects settlement rules with any value below 5 bps.
         let governance_min_fee_bps: u32 = 5;
         let settlement_min_fee_bps: u32 = MIN_FEE_BPS;
         assert_eq!(
@@ -2587,7 +2735,6 @@ mod tests {
         let (ref1, record): (BytesN<32>, PaymentRecord) =
             FromVal::from_val(&env, &data1);
         assert_eq!(ref1, reference);
-        assert_eq!(record.merchant, merchant);
         assert_eq!(record.amount, 20_000);
         assert_eq!(record.platform_fee_amount, 500);
         assert_eq!(record.network_fee_amount, 100);
@@ -2739,7 +2886,6 @@ mod tests {
         assert_eq!(split.network_fee_amount, 0);
         assert_eq!(split.merchant_amount, 9_900);
     }
-}
 
     // Issue #72: verify non-admin transfer_admin calls are rejected
     #[test]
@@ -2832,6 +2978,82 @@ mod tests {
         assert_eq!(split.platform_fee_amount, 5_000);
         assert_eq!(split.network_fee_amount, 2_500);
         assert_eq!(split.merchant_amount, 92_500);
+    }
+
+    // Issue #248: calculate_fee_split panics with a readable AmountOverflow error
+    // instead of a raw arithmetic-overflow panic when amount * bps would overflow i128.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #19)")]
+    fn calculate_fee_split_rejects_amount_that_would_overflow() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        // (i128::MAX - (BPS_DENOMINATOR - 1)) / 500 is the largest amount that stays
+        // safe through the ceil-rounding addition; one past it overflows.
+        let amount = (i128::MAX - (BPS_DENOMINATOR as i128 - 1)) / 500 + 1;
+        client.calculate_fee_split(&merchant, &amount);
+    }
+
+    // Issue #248: store_payment_reference is also protected, since it shares
+    // the same calculate_split code path as calculate_fee_split.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #19)")]
+    fn store_payment_reference_rejects_amount_that_would_overflow() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 250,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let reference = BytesN::from_array(&env, &[77; 32]);
+        // The max of the two bps values (500) determines the overflow boundary.
+        let amount = (i128::MAX - (BPS_DENOMINATOR as i128 - 1)) / 500 + 1;
+        client.store_payment_reference(&merchant, &reference, &amount);
+    }
+
+    // Issue #248: amounts right at the overflow boundary must still succeed normally.
+    #[test]
+    fn calculate_fee_split_accepts_amount_at_overflow_boundary() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 500,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let amount = (i128::MAX - (BPS_DENOMINATOR as i128 - 1)) / 500;
+        let split = client.calculate_fee_split(&merchant, &amount);
+        assert_eq!(split.gross_amount, amount);
+    }
+
+    // Issue #248: a zero-bps rule must never divide by zero in the overflow precheck.
+    #[test]
+    fn calculate_fee_split_with_zero_bps_rule_accepts_max_amount() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let rule = SettlementRule {
+            platform_fee_bps: 0,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &rule);
+        let split = client.calculate_fee_split(&merchant, &i128::MAX);
+        assert_eq!(split.gross_amount, i128::MAX);
+        assert_eq!(split.platform_fee_amount, 0);
+        assert_eq!(split.network_fee_amount, 0);
+        assert_eq!(split.merchant_amount, i128::MAX);
     }
 
     #[test]
