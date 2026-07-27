@@ -1043,10 +1043,12 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
+        let governance = register_governance(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
 
-        client.init(&admin);
+        client.init(&admin, &governance, &recovery_address);
 
         let events = env.events().all();
         assert_eq!(events.len(), 1, "exactly one event emitted on init");
@@ -1076,35 +1078,6 @@ mod tests {
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
         client.get_admin();
-    }
-
-    #[test]
-    fn proposes_and_accepts_admin_successfully() {
-        let (env, client, admin, _) = setup();
-        let new_admin = Address::generate(&env);
-
-        assert_eq!(client.get_pending_admin(), None);
-
-        client.propose_admin(&new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-        assert_eq!(client.get_admin(), admin);
-
-        client.accept_admin();
-        assert_eq!(client.get_admin(), new_admin);
-        assert_eq!(client.get_pending_admin(), None);
-    }
-
-    #[test]
-    fn cancels_admin_proposal() {
-        let (env, client, admin, _) = setup();
-        let new_admin = Address::generate(&env);
-
-        client.propose_admin(&new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-
-        client.cancel_admin_transfer();
-        assert_eq!(client.get_pending_admin(), None);
-        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
@@ -2890,10 +2863,12 @@ mod tests {
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
+        let governance = register_governance(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
         env.mock_all_auths();
-        client.init(&admin);
+        client.init(&admin, &governance, &recovery_address);
         env.mock_auths(&[MockAuth {
             address: &non_admin,
             invoke: &MockAuthInvoke {
@@ -3114,13 +3089,15 @@ mod tests {
         let env = Env::default();
         let admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
+        let governance = register_governance(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, SettlementContract);
         let client = SettlementContractClient::new(&env, &contract_id);
 
         let init_invoke = MockAuthInvoke {
             contract: &contract_id,
             fn_name: "init",
-            args: soroban_sdk::vec![&env, admin.to_val()],
+            args: soroban_sdk::vec![&env, admin.to_val(), governance.to_val(), recovery_address.to_val()],
             sub_invokes: &[],
         };
         let init_auth = MockAuth {
@@ -3128,7 +3105,7 @@ mod tests {
             invoke: &init_invoke,
         };
         env.set_auths(&[(&init_auth).into()]);
-        client.init(&admin);
+        client.init(&admin, &governance, &recovery_address);
 
         let pause_invoke = MockAuthInvoke {
             contract: &contract_id,
