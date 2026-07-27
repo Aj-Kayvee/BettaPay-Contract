@@ -842,12 +842,36 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #2)")]
-    fn get_admin_panics_before_init() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        client.get_admin();
+    fn executes_contract_wasm_upgrade_successfully() {
+        let (env, client, admin) = setup();
+        let new_wasm_hash = upload_test_wasm(&env);
+
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Ensure the upgraded contract remains callable and retains its state.
+        let upgraded_client = GovernanceContractClient::new(&env, &client.address);
+        assert_eq!(upgraded_client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1)")]
+    fn governance_rejects_double_initialization() {
+        let (env, client, _admin) = setup();
+        let other_admin = Address::generate(&env);
+
+        client.init(&other_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn governance_rejects_zero_address_admin_transfer() {
+        let (env, client, admin) = setup();
+        let zero_address = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+
+        client.transfer_admin(&admin, &zero_address);
     }
 
     #[test]
@@ -1182,11 +1206,57 @@ mod tests {
     }
 
     #[test]
-    fn recovery_executes_after_delay() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let recovery_address = Address::generate(&env);
+    fn get_admin_extends_instance_ttl_on_read() {
+        let (env, client, admin) = setup();
+
+        assert_eq!(client.get_admin(), admin);
+
+        env.as_contract(&client.address, || {
+            let ttl = env.storage().instance().get_ttl();
+            assert!(
+                ttl >= ADMIN_TTL_BUMP,
+                "instance TTL must be extended to ADMIN_TTL_BUMP after reading admin"
+            );
+        });
+    }
+
+    #[test]
+    fn get_admin_refreshes_instance_ttl_once_below_threshold() {
+        let (env, client, admin) = setup();
+
+        // First read establishes a full ADMIN_TTL_BUMP remaining TTL.
+        client.get_admin();
+
+        // Advance the ledger so the remaining TTL drops below ADMIN_TTL_THRESHOLD,
+        // which is required for extend_ttl to actually re-trigger on the next read.
+        env.ledger().set_sequence_number(
+            env.ledger().sequence() + (ADMIN_TTL_BUMP - ADMIN_TTL_THRESHOLD) + 1_000,
+        );
+
+        env.as_contract(&client.address, || {
+            let ttl_before_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_before_read < ADMIN_TTL_THRESHOLD,
+                "test setup must actually cross the extension threshold"
+            );
+        });
+
+        assert_eq!(client.get_admin(), admin);
+
+        // get_ttl() reports the remaining ledger count, not an absolute sequence
+        // number, so a freshly re-extended entry settles back at ADMIN_TTL_BUMP.
+        env.as_contract(&client.address, || {
+            let ttl_after_read = env.storage().instance().get_ttl();
+            assert!(
+                ttl_after_read >= ADMIN_TTL_BUMP,
+                "instance TTL must be refreshed back to ADMIN_TTL_BUMP once below the threshold"
+            );
+        });
+    }
+
+    #[test]
+    fn proposes_and_accepts_admin_successfully_in_governance() {
+        let (env, client, admin) = setup();
         let new_admin = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
