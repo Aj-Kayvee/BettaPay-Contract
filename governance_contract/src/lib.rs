@@ -653,7 +653,7 @@ impl GovernanceContract {
         }
 
         let key = DataKey::FeeConfig;
-        env.storage().persistent().set(&key, &config.clone());
+        env.storage().persistent().set(&key, &config);
         env.storage()
             .persistent()
             .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
