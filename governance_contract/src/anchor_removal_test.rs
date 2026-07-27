@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{Env, vec};
+    use crate::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Address, Env};
 
     fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
         let env = Env::default();
@@ -25,5 +25,13 @@ mod tests {
         assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
         client.remove_anchor(&admin, &asset);
         assert_eq!(client.get_anchor(&asset), None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rejects_removing_unregistered_anchor() {
+        let (env, client, admin) = setup();
+        let missing_asset = Address::generate(&env);
+        client.remove_anchor(&admin, &missing_asset);
     }
 }
