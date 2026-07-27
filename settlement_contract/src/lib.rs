@@ -221,13 +221,10 @@ pub enum SettlementError {
     /// The target merchant address is not registered. Raised by
     /// `set_settlement_rule`, `store_payment_reference`, `calculate_fee_split`,
     /// and `unregister_merchant` when the merchant is missing.
-    MerchantMissing = 5,
-    /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
-    /// exceeds 10 000. Raised by `set_settlement_rule` and `set_default_rule`.
+    MerchantMissing = 5,    /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
+    /// exceeds 10 000. Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
-    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
-    /// in `calculate_fee_split`.
-    InvalidAmount = 7,
+    // Code 7 is intentionally reserved (formerly `InvalidAmount`).
     /// `store_payment_reference` was called with a 32‑byte reference that
     /// already exists in storage.
     DuplicatePaymentReference = 8,
@@ -255,6 +252,15 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// The payment amount is zero. Raised by `calculate_fee_split` when
+    /// `amount == 0`.
+    AmountZero = 20,
+    /// The payment amount is negative. Raised by `calculate_fee_split` when
+    /// `amount < 0`.
+    AmountNegative = 21,
+    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100). Raised by
+    /// `store_payment_reference` when `amount < MIN_PAYMENT_AMOUNT`.
+    AmountTooSmall = 22,
 }
 
 #[contract]
@@ -769,7 +775,8 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
+    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
