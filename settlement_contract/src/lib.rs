@@ -118,29 +118,36 @@ pub enum SettlementError {
     /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
     /// exceeds 10 000. Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
-    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
-    /// in `calculate_fee_split`.
-    InvalidAmount = 7,
+    // Code 7 is intentionally reserved (formerly `InvalidAmount`).
     /// `store_payment_reference` was called with a 32‑byte reference that
     /// already exists in storage.
     DuplicatePaymentReference = 8,
     /// The contract is paused. Most state‑mutating operations are blocked.
     Paused = 9,
-    /// `clear_settlement_rule` was called for a merchant that has no
-    /// merchant‑specific rule stored.
-    RuleNotSet = 10,
-    /// The supplied address is the zero‑address or an empty string.
-    /// Raised by `register_merchant` and `transfer_admin`.
-    InvalidAddress = 11,
-    /// `store_payment_reference` was called with an all‑zero 32‑byte
-    /// reference, which is reserved.
-    InvalidPaymentReference = 12,
+    /// The payment amount is zero. Raised by `calculate_fee_split` when
+    /// `amount == 0`.
+    AmountZero = 10,
+    /// The payment amount is negative. Raised by `calculate_fee_split` when
+    /// `amount < 0`.
+    AmountNegative = 11,
+    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100). Raised by
+    /// `store_payment_reference` when `amount < MIN_PAYMENT_AMOUNT`.
+    AmountTooSmall = 12,
     /// `settlement_delay_ledger` exceeds `MAX_SETTLEMENT_DELAY_LEDGER`
     /// (100 000). Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidSettlementDelay = 13,
     /// `transfer_admin` was called with the current admin address as the
     /// new admin. The new admin must be different.
     InvalidAdmin = 14,
+    /// `clear_settlement_rule` was called for a merchant that has no
+    /// merchant‑specific rule stored.
+    RuleNotSet = 15,
+    /// The supplied address is the zero‑address or an empty string.
+    /// Raised by `register_merchant` and `transfer_admin`.
+    InvalidAddress = 16,
+    /// `store_payment_reference` was called with an all‑zero 32‑byte
+    /// reference, which is reserved.
+    InvalidPaymentReference = 17,
 }
 
 #[contract]
@@ -435,7 +442,7 @@ impl SettlementContract {
     /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
+    /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
     /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
     ///
     /// ## Emitted Event: `payment_stored`
@@ -463,7 +470,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidPaymentReference);
         }
         if amount < MIN_PAYMENT_AMOUNT {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+            panic_with_error!(&env, SettlementError::AmountTooSmall);
         }
 
         let payment_key = DataKey::Payment(reference.clone());
@@ -538,13 +545,17 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
+    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if amount <= 0 {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+        if amount == 0 {
+            panic_with_error!(&env, SettlementError::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, SettlementError::AmountNegative);
         }
         let rule = read_rule_or_default(&env, merchant);
         calculate_split(amount, &rule)
@@ -1008,7 +1019,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn rejects_invalid_amount() {
+    fn rejects_amount_too_small_for_zero() {
         let (env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
         let reference = BytesN::from_array(&env, &[2; 32]);
