@@ -840,7 +840,7 @@ fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    if address.to_string() == zero_address {
+    if address.to_string().len() == 0 || address.to_string() == zero_address {
         panic_with_error!(env, error);
     }
 }
@@ -951,6 +951,15 @@ mod tests {
         );
 
         client.transfer_admin(&admin, &zero_address);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
+    fn governance_rejects_empty_address_admin_transfer() {
+        let (env, client, admin) = setup();
+        let empty_address = Address::from_string(&soroban_sdk::String::from_str(&env, ""));
+
+        client.transfer_admin(&admin, &empty_address);
     }
 
     #[test]
