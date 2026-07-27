@@ -155,16 +155,39 @@ pub struct PendingRecovery {
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    /// Storage key for the contract admin address in instance storage.
+    /// Storage key for the contract admin address.
+    /// Uses instance storage because access control needs to share the contract's lifetime
+    /// and requires fast, guaranteed access on almost every privileged invocation.
     Admin,
+    
+    /// Storage key for the recovery address that can reset the admin.
+    /// Uses instance storage because it's a core access control mechanism
+    /// that shares the contract's lifetime.
     RecoveryAddress,
+    
+    /// Storage key for the pending recovery operation.
+    /// Uses instance storage because it's temporary access control state
+    /// tied directly to the contract instance.
     PendingRecovery,
+    
+    /// Storage key for arbitrary system parameters.
+    /// Uses persistent storage because there may be an unbounded number of parameters
+    /// that require independent rent management.
     SystemParam(Symbol),
-    /// Storage key for the fee configuration data in persistent storage.
+    
+    /// Storage key for the fee configuration data.
+    /// Uses persistent storage because fee parameters don't need to block instance
+    /// execution if they expire, and they can be managed via separate rent lifecycles.
     FeeConfig,
-    /// Storage key for the anchor address associated with a specific asset in persistent storage.
+    
+    /// Storage key for the anchor address associated with a specific asset.
+    /// Uses persistent storage because the number of supported assets can grow indefinitely,
+    /// so each anchor must manage its own rent rather than bloating the instance storage.
     Anchor(Address),
-    /// Storage key for the pause state flag in instance storage.
+    
+    /// Storage key for the pause state flag.
+    /// Uses instance storage because the pause state dictates whether the contract
+    /// functions at all, needing cheap, guaranteed access just like the Admin key.
     Paused,
 }
 
