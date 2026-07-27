@@ -71,6 +71,7 @@ use soroban_sdk::{
 use soroban_sdk::testutils::storage::Persistent;
 
 const BPS_DENOMINATOR: u32 = 10_000;
+const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
@@ -539,6 +540,9 @@ impl SettlementContract {
         if rule.platform_fee_bps > BPS_DENOMINATOR || rule.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
+        if rule.platform_fee_bps < MIN_FEE_BPS || rule.network_fee_bps < MIN_FEE_BPS {
+            panic_with_error!(&env, SettlementError::InvalidFeeBps);
+        }
         if rule.platform_fee_bps + rule.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
@@ -616,6 +620,9 @@ impl SettlementContract {
 
         if new_rule.platform_fee_bps > BPS_DENOMINATOR || new_rule.network_fee_bps > BPS_DENOMINATOR
         {
+            panic_with_error!(&env, SettlementError::InvalidFeeBps);
+        }
+        if new_rule.platform_fee_bps < MIN_FEE_BPS || new_rule.network_fee_bps < MIN_FEE_BPS {
             panic_with_error!(&env, SettlementError::InvalidFeeBps);
         }
         if new_rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
@@ -1796,6 +1803,20 @@ mod tests {
 
     #[test]
     #[should_panic]
+    fn rejects_settlement_rule_below_governance_min_fee() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let bad_rule = SettlementRule {
+            platform_fee_bps: 4,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &bad_rule);
+    }
+
+    #[test]
+    #[should_panic]
     fn rejects_fee_sum_exceeding_10000_bps() {
         let (_env, client, _admin, merchant) = setup();
         client.register_merchant(&merchant);
@@ -2435,6 +2456,33 @@ mod tests {
             auto_settle: false,
         };
         client.set_default_rule(&bad_rule);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_default_rule_rejects_below_governance_min_fee() {
+        let (_env, client, _admin, _merchant) = setup();
+
+        let bad_rule = SettlementRule {
+            platform_fee_bps: 4,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_default_rule(&bad_rule);
+    }
+
+    #[test]
+    fn settlement_min_fee_matches_governance_min_fee() {
+        // Both contracts must enforce the same minimum fee of 5 bps.
+        // Governance rejects fee configs with any value below 5 bps,
+        // and settlement rejects settlement rules with any value below 5 bps.
+        let governance_min_fee_bps: u32 = 5;
+        let settlement_min_fee_bps: u32 = MIN_FEE_BPS;
+        assert_eq!(
+            governance_min_fee_bps, settlement_min_fee_bps,
+            "settlement MIN_FEE_BPS must match governance MIN_FEE_BPS"
+        );
     }
 
     #[test]
