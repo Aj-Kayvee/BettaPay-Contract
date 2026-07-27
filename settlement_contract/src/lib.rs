@@ -618,6 +618,11 @@ impl SettlementContract {
     /// ## Event: `default_rule_updated`
     ///
     /// Emitted when the global default settlement rule is updated.
+    ///
+    /// ## Panics
+    ///
+    /// - Panics with `InvalidSettlementDelay` if `new_rule.settlement_delay_ledger`
+    ///   exceeds `MAX_SETTLEMENT_DELAY_LEDGER`.
     pub fn set_default_rule(env: Env, new_rule: SettlementRule) {
         assert_not_paused(&env);
         let admin = read_admin(&env);
