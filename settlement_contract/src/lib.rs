@@ -695,11 +695,11 @@ impl SettlementContract {
         amount: i128,
     ) -> FeeSplit {
         assert_not_paused(&env);
-        merchant.require_auth();
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
+        merchant.require_auth();
         if reference == BytesN::from_array(&env, &[0; 32]) {
             panic_with_error!(&env, SettlementError::InvalidPaymentReference);
         }
