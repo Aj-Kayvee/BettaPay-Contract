@@ -484,6 +484,10 @@ impl GovernanceContract {
     /// System parameters are arbitrary `i128` values keyed by a `Symbol` and are
     /// intended for protocol-level configuration such as settlement delay bounds.
     ///
+    /// This function is intentionally exempt from the pause guard. When a
+    /// contract is paused, administrators must still be able to update system
+    /// parameters to resolve the underlying emergency that caused the pause.
+    ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
@@ -503,8 +507,8 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     /// Panics with `GovernanceError::InvalidParamValue` if `key` exceeds 32 bytes.
+    /// Panics with `GovernanceError::InvalidParamValue` if `value` is negative.
     pub fn update_system_param(env: Env, caller: Address, key: Symbol, value: i128) {
         if key.to_string().len() > 32 {
             panic_with_error!(&env, GovernanceError::InvalidParamValue);
