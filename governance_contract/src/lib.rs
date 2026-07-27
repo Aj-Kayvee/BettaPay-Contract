@@ -479,6 +479,7 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn set_fee_config(env: Env, caller: Address, config: FeeConfig) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
