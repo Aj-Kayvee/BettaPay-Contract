@@ -31,6 +31,36 @@
 //! The contract leverages different `DataKey` variants (`Admin`, `Merchant`, `Rule`, `Payment`, etc.)
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
+//!
+//! ## Upgrade Process
+//!
+//! [`SettlementContract::upgrade`] replaces the Wasm and nothing else. That is
+//! what makes it safe, and also why changing a stored type is a separate
+//! problem: nothing converts existing entries, and nothing checks that they
+//! still match the types the new code expects. A mismatched read fails at
+//! runtime, after the upgrade has already landed.
+//!
+//! 1. Wasm upgrades replace code only; every storage entry survives untouched.
+//! 2. Storage migrations run **inside the upgraded contract**, as an
+//!    admin-gated `migrate` entry point — not from a separate migration
+//!    contract. A contract can only reach its own storage, so another contract
+//!    has no access path to `Payment`, `Merchant` or `Rule` entries.
+//! 3. Ship the old type definition in the same Wasm as the new one. A
+//!    `#[contracttype]` struct is encoded by field name, so a `PaymentRecord`
+//!    written before a new field existed will not deserialise into the new
+//!    struct — the old type is what keeps those entries readable.
+//! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
+//!    post-upgrade state, then remove the migration code in a later upgrade.
+//! 5. `Payment(BytesN<32>)`, `Merchant(Address)` and `Rule(Address)` are keyed
+//!    by value and Soroban cannot enumerate storage keys — which is why
+//!    [`SettlementContract::get_payments`] takes the references from the
+//!    caller. Convert these lazily on read, or pass the keys in explicitly.
+//! 6. Call `extend_ttl` on anything the migration rewrites: `set` alone does
+//!    not extend an entry's life, so a migrated record would otherwise expire
+//!    sooner than an untouched one.
+//!
+//! Full guidance, including worked examples and how to test a migration, is in
+//! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
 
 #![no_std]
 

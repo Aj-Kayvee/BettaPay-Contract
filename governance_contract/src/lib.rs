@@ -21,6 +21,28 @@
 //! code takes over immediately; if a storage-schema migration is needed, a
 //! separate migration function should be invoked in the same transaction.
 //!
+//! ### Upgrade Process
+//! `upgrade` is safe because it ignores storage, which is also why changing a
+//! stored type is a separate problem. Nothing converts existing entries, and
+//! nothing checks that they still match the types the new code expects — a
+//! mismatched read fails at runtime, after the upgrade has landed.
+//!
+//! 1. Wasm upgrades replace code only; every storage entry survives untouched.
+//! 2. Storage migrations run **inside the upgraded contract**, as an
+//!    admin-gated `migrate` entry point — not from a separate migration
+//!    contract. A contract can only reach its own storage, so another contract
+//!    has no access path to these entries.
+//! 3. Ship the old type definition in the same Wasm as the new one. It is what
+//!    makes existing entries readable while they are converted.
+//! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
+//!    post-upgrade state, then remove the migration code in a later upgrade.
+//! 5. `Anchor(Address)` and `SystemParam(Symbol)` are keyed by value and
+//!    Soroban cannot enumerate storage keys, so those cannot be migrated by
+//!    iteration. Convert them lazily on read, or pass the keys in explicitly.
+//!
+//! Full guidance, including worked examples and the TTL hazards, is in
+//! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
+//!
 //! ### Pause / Unpause
 //! The admin can halt all mutating governance operations by calling
 //! [`GovernanceContract::pause`]. This sets a boolean flag in instance storage
