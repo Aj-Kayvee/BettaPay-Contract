@@ -61,6 +61,15 @@
 //! Full guidance, including worked examples and how to test a migration, is in
 //! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
 
+// TODO: Refactor flat file structure into modular hierarchy (Issue #84)
+// Intended module structure:
+// - mod types: Data structures (enums, structs)
+// - mod storage: DataKey and storage access helpers
+// - mod events: Event definitions and emission helpers
+// - mod errors: Error enums
+// - mod contract: Main contract trait implementation
+// - mod test: Unit and integration tests
+
 #![no_std]
 
 use soroban_sdk::{
