@@ -3059,13 +3059,13 @@ mod tests {
     }
 
     #[test]
-    fn merchant_registration_succeeds_when_paused() {
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn merchant_registration_rejected_when_paused() {
         let (_env, client, _admin, merchant) = setup();
         client.pause();
         assert!(client.is_paused());
 
         client.register_merchant(&merchant);
-        assert!(client.is_merchant_registered(&merchant));
     }
 
     #[test]
