@@ -790,6 +790,10 @@ impl SettlementContract {
     ///
     /// Missing references are silently skipped.
     pub fn get_payments(env: Env, references: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
+        // `references.len()` is known upfront, so pre-allocating would avoid repeated
+        // reallocation as this vector grows. soroban-sdk 21.7.7's Vec<T> has no
+        // `with_capacity` constructor (only `new`, `from_array`, `from_slice`), so
+        // this is left as a potential optimization for a future SDK version.
         let mut payments = Vec::new(&env);
 
         for reference in references.iter() {
@@ -1533,6 +1537,34 @@ mod tests {
         assert_eq!(payments.len(), 2);
         assert_eq!(payments.get(0).unwrap().amount, 10_000);
         assert_eq!(payments.get(1).unwrap().amount, 20_000);
+    }
+
+    // Issue #340: get_payments must still return every requested payment, in the
+    // requested order, for a batch large enough to trigger multiple Vec growths
+    // (regardless of whether the underlying Vec is pre-allocated).
+    #[test]
+    fn get_payments_returns_all_records_in_order_for_large_batch() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        const BATCH_SIZE: u8 = 20;
+        let mut references = Vec::new(&env);
+        for i in 1..=BATCH_SIZE {
+            let reference = BytesN::from_array(&env, &[i; 32]);
+            let amount = MIN_PAYMENT_AMOUNT + i as i128;
+            client.store_payment_reference(&merchant, &reference, &amount);
+            references.push_back(reference);
+        }
+
+        let payments = client.get_payments(&references);
+
+        assert_eq!(payments.len(), BATCH_SIZE as u32);
+        for i in 1..=BATCH_SIZE {
+            assert_eq!(
+                payments.get((i - 1) as u32).unwrap().amount,
+                MIN_PAYMENT_AMOUNT + i as i128
+            );
+        }
     }
 
     #[test]
