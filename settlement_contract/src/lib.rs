@@ -133,13 +133,17 @@ const BPS_DENOMINATOR: u32 = 10_000;
 const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
-const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
-const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
-const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
-const RULE_TTL_BUMP: u32 = 17280 * 30;
+/// Approximate ledgers per day on Stellar (~5s per ledger).
+const LEDGERS_PER_DAY: u32 = 17280;
+
+// TTL thresholds and bumps use LEDGERS_PER_DAY for readability.
+const PAYMENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;  // 14 days
+const PAYMENT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;       // 30 days
+const RULE_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
+const RULE_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
+const MERCHANT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
+const MERCHANT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
 const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
-const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
-const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
 
 // Used until the admin sets a global default settlement rule.
 const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
