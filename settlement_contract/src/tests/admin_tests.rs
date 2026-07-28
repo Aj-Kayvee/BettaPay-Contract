@@ -156,12 +156,7 @@ fn pause_rejected_for_non_admin() {
     let init_invoke = MockAuthInvoke {
         contract: &contract_id,
         fn_name: "init",
-        args: soroban_sdk::vec![
-            &env,
-            admin.to_val(),
-            governance.to_val(),
-            recovery.to_val()
-        ],
+        args: soroban_sdk::vec![&env, admin.to_val(), governance.to_val(), recovery.to_val()],
         sub_invokes: &[],
     };
     let init_auth = MockAuth {

@@ -2,6 +2,7 @@
 //! `calculate_fee_split`, `set_settlement_rule`, `clear_settlement_rule`, `set_default_rule`.
 
 use crate::*;
+use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
 use soroban_sdk::{FromVal, IntoVal};
 
@@ -267,8 +268,7 @@ fn fee_split_invariants_hold_for_random_inputs() {
             ),
             |(amount, platform_fee_bps, network_fee_bps)| {
                 prop_assume!(
-                    (platform_fee_bps as u64) + (network_fee_bps as u64)
-                        <= BPS_DENOMINATOR as u64
+                    (platform_fee_bps as u64) + (network_fee_bps as u64) <= BPS_DENOMINATOR as u64
                 );
 
                 let rule = SettlementRule {
@@ -280,9 +280,7 @@ fn fee_split_invariants_hold_for_random_inputs() {
                 let split = calculate_split(&env, amount, &rule);
 
                 prop_assert_eq!(
-                    split.merchant_amount
-                        + split.platform_fee_amount
-                        + split.network_fee_amount,
+                    split.merchant_amount + split.platform_fee_amount + split.network_fee_amount,
                     amount
                 );
                 prop_assert_eq!(split.gross_amount, amount);
@@ -290,9 +288,7 @@ fn fee_split_invariants_hold_for_random_inputs() {
                 prop_assert!(split.network_fee_amount >= 0);
 
                 if split.merchant_amount >= 0 {
-                    prop_assert!(
-                        split.platform_fee_amount + split.network_fee_amount <= amount
-                    );
+                    prop_assert!(split.platform_fee_amount + split.network_fee_amount <= amount);
                 } else {
                     prop_assert!(
                         split.platform_fee_amount + split.network_fee_amount > amount,
@@ -391,7 +387,11 @@ fn sets_and_reads_settlement_rule() {
     let events = env.events().all();
     // set_settlement_rule emits bootstrap_fallback (from read_rule_or_default for prev)
     // + settlement_rule_updated = 2 contract events on first set.
-    assert_eq!(events.len(), prev_count + 2, "exactly two events emitted on first set");
+    assert_eq!(
+        events.len(),
+        prev_count + 2,
+        "exactly two events emitted on first set"
+    );
 
     let (_contract_id, topics, _data) = events.get(prev_count + 1).unwrap();
 
@@ -666,7 +666,11 @@ fn set_settlement_rule_publishes_event_with_rule_data() {
     client.set_settlement_rule(&merchant, &rule);
     let events = env.events().all();
     // On first set, read_rule_or_default emits bootstrap_fallback for prev lookup.
-    assert_eq!(events.len(), before + 2, "exactly two events emitted on first set");
+    assert_eq!(
+        events.len(),
+        before + 2,
+        "exactly two events emitted on first set"
+    );
     let (_contract_id, topics, data) = events.get(before + 1).unwrap();
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
@@ -742,10 +746,19 @@ fn admin_clears_custom_rule() {
     assert_eq!(admin_addr, _admin);
     assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
     assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
-    assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+    assert_eq!(
+        removed.settlement_delay_ledger,
+        rule.settlement_delay_ledger
+    );
     assert_eq!(removed.auto_settle, rule.auto_settle);
-    assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
-    assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
+    assert_eq!(
+        fallback.platform_fee_bps,
+        BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+    );
+    assert_eq!(
+        fallback.network_fee_bps,
+        BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+    );
     assert_eq!(
         fallback.settlement_delay_ledger,
         BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
@@ -792,10 +805,19 @@ fn clearing_rule_falls_back_to_defaults() {
         FromVal::from_val(&env, &data);
     assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
     assert_eq!(removed.network_fee_bps, rule.network_fee_bps);
-    assert_eq!(removed.settlement_delay_ledger, rule.settlement_delay_ledger);
+    assert_eq!(
+        removed.settlement_delay_ledger,
+        rule.settlement_delay_ledger
+    );
     assert_eq!(removed.auto_settle, rule.auto_settle);
-    assert_eq!(fallback.platform_fee_bps, BOOTSTRAP_DEFAULT_RULE.platform_fee_bps);
-    assert_eq!(fallback.network_fee_bps, BOOTSTRAP_DEFAULT_RULE.network_fee_bps);
+    assert_eq!(
+        fallback.platform_fee_bps,
+        BOOTSTRAP_DEFAULT_RULE.platform_fee_bps
+    );
+    assert_eq!(
+        fallback.network_fee_bps,
+        BOOTSTRAP_DEFAULT_RULE.network_fee_bps
+    );
     assert_eq!(
         fallback.settlement_delay_ledger,
         BOOTSTRAP_DEFAULT_RULE.settlement_delay_ledger
@@ -990,7 +1012,8 @@ fn set_default_rule_extends_ttl_on_update() {
     // hops, touching the contract via get_admin() between hops, so the
     // instance's own (much shorter) TTL doesn't expire along the way.
     for _ in 0..5 {
-        env.ledger().set_sequence_number(env.ledger().sequence() + 60_000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 60_000);
         client.get_admin();
     }
 

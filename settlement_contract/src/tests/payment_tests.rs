@@ -2,7 +2,8 @@
 //! `store_payment_reference`, `get_payment_reference`, `get_payments`.
 
 use crate::*;
-use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::storage::Persistent as _;
+use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
 use soroban_sdk::FromVal;
 
 use super::{register_governance, setup};
@@ -37,7 +38,7 @@ fn stores_payment_reference_once_and_calculates_split() {
     assert_eq!(stored.platform_fee_bps, 250);
     assert_eq!(stored.network_fee_bps, 50);
     assert_eq!(stored.amount, 20_000);
-    assert!(env.events().all().len() >= before + 1);
+    assert!(env.events().all().len() > before);
 }
 
 #[test]
@@ -275,7 +276,10 @@ fn store_payment_reference_extends_rule_ttl_on_read() {
         let key = DataKey::Rule(merchant.clone());
         assert!(env.storage().persistent().has(&key));
         let ttl = env.storage().persistent().get_ttl(&key);
-        assert!(ttl >= RULE_TTL_BUMP, "Merchant Rule TTL must be set on write");
+        assert!(
+            ttl >= RULE_TTL_BUMP,
+            "Merchant Rule TTL must be set on write"
+        );
     });
 
     let reference = BytesN::from_array(&env, &[42; 32]);
@@ -286,7 +290,10 @@ fn store_payment_reference_extends_rule_ttl_on_read() {
         let key = DataKey::Rule(merchant.clone());
         assert!(env.storage().persistent().has(&key));
         let ttl = env.storage().persistent().get_ttl(&key);
-        assert!(ttl >= RULE_TTL_BUMP, "Merchant Rule TTL must remain >= RULE_TTL_BUMP after read");
+        assert!(
+            ttl >= RULE_TTL_BUMP,
+            "Merchant Rule TTL must remain >= RULE_TTL_BUMP after read"
+        );
     });
 }
 
@@ -346,12 +353,18 @@ fn split_data_available_on_payment_stored() {
     let split = client.store_payment_reference(&merchant, &reference, &10_000);
     // Exactly one event emitted: payment_stored
     let events = env.events().all();
-    assert_eq!(events.len(), before + 1, "exactly one payment_stored event expected");
+    assert_eq!(
+        events.len(),
+        before + 1,
+        "exactly one payment_stored event expected"
+    );
     // The fee split is returned directly and also stored on the PaymentRecord
     assert_eq!(split.platform_fee_amount, 200); // 200 bps of 10_000
-    assert_eq!(split.network_fee_amount, 50);   // 50 bps of 10_000
+    assert_eq!(split.network_fee_amount, 50); // 50 bps of 10_000
     assert_eq!(split.merchant_amount, 9_750);
-    let record = client.get_payment_reference(&reference).expect("record must exist");
+    let record = client
+        .get_payment_reference(&reference)
+        .expect("record must exist");
     assert_eq!(record.platform_fee_amount, 200);
     assert_eq!(record.network_fee_amount, 50);
     assert_eq!(record.merchant_amount, 9_750);

@@ -147,7 +147,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    String, Symbol,
+    String, Symbol, SymbolStr, TryFromVal,
 };
 
 /// Minimum allowed fee in basis points (0.05%).
@@ -160,7 +160,12 @@ const ANCHOR_TTL_THRESHOLD: u32 = 17280 * 14;
 const ANCHOR_TTL_BUMP: u32 = 17280 * 30;
 const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
 const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
+// Mirrors the private constants of the same name in the `shared` crate;
+// kept here (test-only) so tests can assert on the exact TTL values without
+// `shared` needing to expose them as part of its public API.
+#[cfg(test)]
 const ADMIN_TTL_THRESHOLD: u32 = 17280 * 14;
+#[cfg(test)]
 const ADMIN_TTL_BUMP: u32 = 17280 * 30;
 const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -572,7 +577,7 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::InvalidParamValue` if `key` exceeds 32 bytes.
     /// Panics with `GovernanceError::InvalidParamValue` if `value` is negative.
     pub fn update_system_param(env: Env, caller: Address, key: Symbol, value: i128) {
-        if key.to_string().len() > 32 {
+        if symbol_len(&env, &key) > 32 {
             panic_with_error!(&env, GovernanceError::InvalidParamValue);
         }
 
@@ -621,7 +626,7 @@ impl GovernanceContract {
     /// Extends the persistent storage TTL for `DataKey::SystemParam(key)` when the
     /// entry is present.
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
-        if key.to_string().len() > 32 {
+        if symbol_len(&env, &key) > 32 {
             panic_with_error!(&env, GovernanceError::InvalidParamValue);
         }
 
@@ -754,6 +759,7 @@ impl GovernanceContract {
         }
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events().publish(
@@ -820,12 +826,13 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         let result = env.storage().persistent().get(&key);
         if result.is_some() {
-            let ttl = env.storage().persistent().get_ttl(&key);
-            if ttl < ANCHOR_TTL_THRESHOLD {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
-            }
+            // `extend_ttl` only writes when the current TTL is below
+            // `threshold`, so this has the same externally observable
+            // behavior as a manual get_ttl-then-extend check, without
+            // depending on `get_ttl`, which is test-only in production code.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         }
         result
     }
@@ -845,13 +852,7 @@ impl GovernanceContract {
 ///
 /// Panics if the contract has not been initialized yet.
 fn read_admin(env: &Env) -> Address {
-    env.storage()
-        .instance()
-        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
-    env.storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
+    shared::read_admin(env, GovernanceError::NotInitialized)
 }
 
 fn read_recovery_address(env: &Env) -> Address {
@@ -874,16 +875,24 @@ fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    if address.to_string().len() == 0 || address.to_string() == zero_address {
+    if address.to_string().is_empty() || address.to_string() == zero_address {
         panic_with_error!(env, error);
     }
 }
 
 fn is_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false)
+    shared::is_paused(env)
+}
+
+/// Returns the character length of a `Symbol`.
+///
+/// `Symbol` has no `ToString`/`Display` impl available on the wasm target
+/// (soroban-sdk gates that behind `not(target_family = "wasm")`), so length
+/// is measured via `SymbolStr`, which is available on every target.
+fn symbol_len(env: &Env, key: &Symbol) -> usize {
+    SymbolStr::try_from_val(env, &key.to_symbol_val())
+        .map(|s| s.len())
+        .unwrap_or(0)
 }
 
 /// Ensures the governance contract is not currently paused.
@@ -896,10 +905,27 @@ fn is_paused(env: &Env) -> bool {
 ///
 /// Panics with `GovernanceError::Paused` if the contract is currently paused.
 fn assert_not_paused(env: &Env) {
-    if is_paused(env) {
-        panic_with_error!(env, GovernanceError::Paused);
-    }
+    shared::assert_not_paused(env, GovernanceError::Paused);
 }
+
+/// Shared test setup used across the main test module and the anchor_*
+/// sub-modules, so a change to `init`'s signature only needs updating here.
+#[cfg(test)]
+pub(crate) fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
+    use soroban_sdk::testutils::Address as _;
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let contract_id = env.register_contract(None, GovernanceContract);
+    let client = GovernanceContractClient::new(&env, &contract_id);
+    client.init(&admin, &recovery_address);
+    (env, client, admin)
+}
+
+#[cfg(test)]
+mod anchor_auth_tests;
 
 #[cfg(test)]
 mod anchor_event_tests;
@@ -910,20 +936,9 @@ mod anchor_removal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
     use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{vec, Bytes, FromVal};
-
-    fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let recovery_address = Address::generate(&env);
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        client.init(&admin, &recovery_address);
-        (env, client, admin)
-    }
 
     #[allow(dead_code)]
     fn setup_no_mock() -> (Env, GovernanceContractClient<'static>, Address) {
@@ -980,10 +995,10 @@ mod tests {
     #[should_panic(expected = "Error(Contract, #7)")]
     fn governance_rejects_zero_address_admin_transfer() {
         let (env, client, admin) = setup();
-        let zero_address = Address::from_str(
+        let zero_address = Address::from_string(&soroban_sdk::String::from_str(
             &env,
             "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        );
+        ));
 
         client.transfer_admin(&admin, &zero_address);
     }
@@ -1113,14 +1128,15 @@ mod tests {
         let result = client.get_anchor(&asset);
         assert_eq!(result, Some(anchor));
 
-        // TTL should now be at least current_ledger + ANCHOR_TTL_BUMP
+        // `get_ttl` returns the *remaining* TTL (live_until - current_ledger),
+        // not an absolute ledger number, so it must be compared directly
+        // against ANCHOR_TTL_BUMP rather than current_ledger + ANCHOR_TTL_BUMP.
         env.as_contract(&client.address, || {
             let key = DataKey::Anchor(asset.clone());
             let ttl = env.storage().persistent().get_ttl(&key);
             assert!(
-                ttl >= env.ledger().sequence() + ANCHOR_TTL_BUMP,
-                "anchor TTL must be extended when below threshold: ttl={ttl}, need >= {}",
-                env.ledger().sequence() + ANCHOR_TTL_BUMP,
+                ttl >= ANCHOR_TTL_BUMP,
+                "anchor TTL must be extended when below threshold: ttl={ttl}, need >= {ANCHOR_TTL_BUMP}",
             );
         });
     }
@@ -1276,8 +1292,17 @@ mod tests {
         assert_eq!(client.get_admin(), admin);
     }
 
+    // `Symbol`'s 32-character limit is enforced by the Stellar protocol
+    // itself (SCSYMBOL_LIMIT) at construction time, not merely by an SDK
+    // convenience check. `Symbol::new` below panics with
+    // `Error(Value, InvalidInput)` before `update_system_param` is ever
+    // invoked, so this test necessarily observes the SDK/protocol-level
+    // panic rather than `GovernanceError::InvalidParamValue` — there is no
+    // public API path to construct an in-memory `Symbol` over 32 characters,
+    // so the contract's own length guard (`symbol_len` in this file, kept as
+    // defense-in-depth) can never actually be reached through it.
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
     fn rejects_oversized_symbol_key() {
         let (env, client, _admin) = setup();
         // A string longer than 32 characters
@@ -1384,10 +1409,11 @@ mod tests {
 
     #[test]
     fn proposes_and_accepts_admin_successfully_in_governance() {
-        let (env, client, admin) = setup();
+        let (env, _client, admin) = setup();
         let new_admin = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
+        let recovery_address = Address::generate(&env);
 
         client.init(&admin, &recovery_address);
         assert_eq!(client.get_recovery_address(), recovery_address);
@@ -1408,16 +1434,21 @@ mod tests {
         client.update_system_param(&admin, &key, &-1);
     }
 
+    // See `rejects_oversized_symbol_key` above: `Symbol::new` itself panics
+    // for a >32-char string, so this observes the SDK/protocol panic rather
+    // than `GovernanceError::InvalidParamValue`.
     #[test]
-    #[should_panic(expected = "Error(Contract, #8)")]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
     fn rejects_update_system_param_with_oversized_key() {
         let (env, client, admin) = setup();
         let long_key = Symbol::new(&env, "this_key_is_way_too_long_for_soroban");
         client.update_system_param(&admin, &long_key, &1440);
     }
 
+    // See `rejects_oversized_symbol_key` above for why this expects the
+    // SDK/protocol panic rather than `GovernanceError::InvalidParamValue`.
     #[test]
-    #[should_panic(expected = "Error(Contract, #8)")]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
     fn rejects_get_system_param_with_oversized_key() {
         let (env, client, _admin) = setup();
         let long_key = Symbol::new(&env, "this_key_is_way_too_long_for_soroban");
@@ -1510,12 +1541,20 @@ mod tests {
         client.pause(&admin);
         assert!(client.is_paused());
 
-        // None of these should panic while paused - the admin must be able
-        // to resolve issues during a pause, not be locked out of it.
+        // Only update_system_param is documented/intentionally exempt from
+        // the pause guard, so it's the only one that should succeed here -
+        // set_fee_config and remove_anchor both call assert_not_paused.
         let key = Symbol::new(&env, "max_settle");
         client.update_system_param(&admin, &key, &1440);
         assert_eq!(client.get_system_param(&key), Some(1440));
 
+        // Still paused throughout - the exempt call above didn't unpause it.
+        assert!(client.is_paused());
+
+        client.unpause(&admin);
+
+        // set_fee_config and remove_anchor are pause-guarded; verify they
+        // work normally once unpaused.
         let cfg = FeeConfig {
             platform_fee_bps: 120,
             network_fee_bps: 35,
@@ -1523,12 +1562,8 @@ mod tests {
         client.set_fee_config(&admin, &cfg);
         assert_eq!(client.get_fee_config().unwrap().platform_fee_bps, 120);
 
-        // remove_anchor still works while paused
         client.remove_anchor(&admin, &asset);
         assert_eq!(client.get_anchor(&asset), None);
-
-        // Still paused throughout - none of the above silently unpaused it.
-        assert!(client.is_paused());
     }
 
     #[test]
