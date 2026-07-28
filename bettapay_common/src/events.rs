@@ -60,8 +60,10 @@ pub const RECOVERY_EXECUTED_EVENT: &str = "recovery_executed";
 /// Topics: `(Symbol("admin_transferred"),)`
 /// Data:    `AdminTransferred { old_admin, new_admin }`
 pub fn emit_admin_transferred(env: &Env, payload: &AdminTransferred) {
-    env.events()
-        .publish((Symbol::new(env, ADMIN_TRANSFERRED_EVENT),), payload.clone());
+    env.events().publish(
+        (Symbol::new(env, ADMIN_TRANSFERRED_EVENT),),
+        payload.clone(),
+    );
 }
 
 /// Emits the `paused` event.
@@ -86,7 +88,12 @@ pub fn emit_unpaused(env: &Env, admin: &Address) {
 ///
 /// Topics: `(Symbol("recovery_initiated"),)`
 /// Data:    `(recovery_address, new_admin, execute_after)`
-pub fn emit_recovery_initiated(env: &Env, recovery: &Address, new_admin: &Address, execute_after: u64) {
+pub fn emit_recovery_initiated(
+    env: &Env,
+    recovery: &Address,
+    new_admin: &Address,
+    execute_after: u64,
+) {
     env.events().publish(
         (Symbol::new(env, RECOVERY_INITIATED_EVENT),),
         (recovery.clone(), new_admin.clone(), execute_after),
@@ -107,6 +114,8 @@ pub fn emit_recovery_cancelled(env: &Env, admin: &Address) {
 /// Topics: `(Symbol("recovery_executed"),)`
 /// Data:    `AdminTransferred { old_admin, new_admin }`
 pub fn emit_recovery_executed(env: &Env, payload: &AdminTransferred) {
-    env.events()
-        .publish((Symbol::new(env, RECOVERY_EXECUTED_EVENT),), payload.clone());
+    env.events().publish(
+        (Symbol::new(env, RECOVERY_EXECUTED_EVENT),),
+        payload.clone(),
+    );
 }

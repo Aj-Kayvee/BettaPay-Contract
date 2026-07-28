@@ -85,14 +85,18 @@
 //! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
 //!
 //! ## Pause Model
-//! The pause flag blocks payment-processing and merchant-management operations.
-//! The following administrative operations are intentionally NOT blocked
-//! during pause, so the admin can fix the root cause of the emergency:
+//! The pause flag blocks payment-processing and merchant-management
+//! operations (`register_merchant`, `unregister_merchant`,
+//! `set_settlement_rule`, `clear_settlement_rule`, `set_default_rule`,
+//! `store_payment_reference`, `update_governance` all call
+//! `assert_not_paused`). The following administrative operations are
+//! intentionally NOT blocked during pause, so the admin can fix the root
+//! cause of the emergency:
+//!
 //! - `upgrade` — deploy a fix
 //! - `transfer_admin` — rotate compromised keys
-//! - `update_system_param` — adjust system configuration
-//! - `set_fee_config` — update fee parameters
-//! All other mutating functions check the pause flag via assert_not_paused().
+//! - `initiate_recovery` / `cancel_recovery` / `execute_recovery` — the
+//!   admin-recovery flow itself must keep working while paused
 //!
 //! ## Event Convention
 //!
@@ -133,7 +137,11 @@
 
 #![no_std]
 
-use soroban_sdk::testutils::storage::Persistent;
+use bettapay_common::{
+    constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
+    events::PendingRecovery,
+    storage::{self, CommonDataKey},
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, Symbol, Val, Vec,
@@ -250,15 +258,13 @@ pub struct FeeConfig {
     pub network_fee_bps: u32,
 }
 
+// Admin, RecoveryAddress, PendingRecovery, and Paused live in
+// `bettapay_common::storage::CommonDataKey` instead of here - see that
+// type's doc comment for why a shared key type is safe to mix with this
+// contract's own storage without a migration.
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    /// Instance — singleton, read on every mutating call.
-    Admin,
-    /// Instance — singleton address, rarely changes.
-    RecoveryAddress,
-    /// Instance — singleton boolean flag, read on every mutating call.
-    PendingRecovery,
     /// Instance — singleton address, rarely changes.
     Governance,
     /// Persistent — one per merchant, many entries.
@@ -269,8 +275,6 @@ enum DataKey {
     DefaultRule,
     /// Persistent — one per payment, high volume.
     Payment(BytesN<32>),
-    /// Instance — singleton boolean, read on every mutating call.
-    Paused,
 }
 
 #[contracterror]
@@ -324,15 +328,18 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
-    /// The payment amount is zero. Raised by `calculate_fee_split` when
-    /// `amount == 0`.
-    AmountZero = 20,
-    /// The payment amount is negative. Raised by `calculate_fee_split` when
-    /// `amount < 0`.
-    AmountNegative = 21,
     /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100). Raised by
     /// `store_payment_reference` when `amount < MIN_PAYMENT_AMOUNT`.
     AmountTooSmall = 22,
+    /// The payment amount is zero. Raised by `calculate_fee_split` when
+    /// `amount == 0`.
+    // 20/21 are taken by EmptyAddress/ZeroAddress above; this and
+    // AmountNegative were originally assigned 20/21 too, which doesn't
+    // compile (duplicate discriminants) - renumbered to the next free codes.
+    AmountZero = 23,
+    /// The payment amount is negative. Raised by `calculate_fee_split` when
+    /// `amount < 0`.
+    AmountNegative = 24,
 }
 
 #[contract]
@@ -351,7 +358,7 @@ impl SettlementContract {
         }
         admin.require_auth();
         validate_governance(&env, &governance);
-        assert_not_zero_address(
+        validate_nonzero_address(
             &env,
             &recovery_address,
             SettlementError::InvalidRecoveryAddress,
@@ -400,7 +407,12 @@ impl SettlementContract {
     pub fn initiate_recovery(env: Env, new_admin: Address) {
         let recovery_address = read_recovery_address(&env);
         recovery_address.require_auth();
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAdmin, SettlementError::InvalidAdmin);
+        validate_nonzero_address(
+            &env,
+            &new_admin,
+            SettlementError::InvalidAdmin,
+            SettlementError::InvalidAdmin,
+        );
 
         let pending = PendingRecovery {
             new_admin: new_admin.clone(),
@@ -471,13 +483,22 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        validate_nonzero_address(&env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        validate_nonzero_address(
+            &env,
+            &new_admin,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
 
         if new_admin == admin {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
@@ -554,7 +575,12 @@ impl SettlementContract {
     pub fn register_merchant(env: Env, merchant: Address) {
         assert_not_paused(&env);
 
-        validate_nonzero_address(&env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        validate_nonzero_address(
+            &env,
+            &merchant,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
 
         let admin = read_admin(&env);
         admin.require_auth();
@@ -615,11 +641,14 @@ impl SettlementContract {
 
         let rule_key = DataKey::Rule(merchant.clone());
         let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
-        if old_rule.is_some() {
+        if let Some(old_rule) = old_rule {
             env.storage().persistent().remove(&rule_key);
             env.events().publish(
-                (Symbol::new(&env, "settlement_rule_cleared"), merchant.clone()),
-                (admin.clone(), old_rule.unwrap()),
+                (
+                    Symbol::new(&env, "settlement_rule_cleared"),
+                    merchant.clone(),
+                ),
+                (admin.clone(), old_rule),
             );
         }
 
@@ -907,14 +936,13 @@ impl SettlementContract {
         let key = DataKey::Payment(reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
         if record.is_some() {
-            let ttl = env.storage().persistent().get_ttl(&key);
-            if ttl < PAYMENT_TTL_THRESHOLD {
-                env.storage().persistent().extend_ttl(
-                    &key,
-                    PAYMENT_TTL_THRESHOLD,
-                    PAYMENT_TTL_BUMP,
-                );
-            }
+            // `extend_ttl` only writes when the current TTL is below
+            // `threshold`, so this has the same externally observable
+            // behavior as a manual get_ttl-then-extend check, without
+            // depending on `get_ttl`, which is test-only in production code.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
         }
         record
     }
@@ -978,21 +1006,27 @@ fn read_pending_recovery(env: &Env) -> PendingRecovery {
 }
 
 fn validate_governance(env: &Env, governance: &Address) {
-    validate_nonzero_address(env, governance, SettlementError::InvalidGovernance, SettlementError::InvalidGovernance);
+    validate_nonzero_address(
+        env,
+        governance,
+        SettlementError::InvalidGovernance,
+        SettlementError::InvalidGovernance,
+    );
     let args: Vec<Val> = Vec::new(env);
     let _: Option<FeeConfig> =
         env.invoke_contract(governance, &Symbol::new(env, "get_fee_config"), args);
 }
 
-fn validate_nonzero_address(env: &Env, address: &Address, empty_error: SettlementError, zero_error: SettlementError) {
-    if address.to_string().len() == 0 {
+fn validate_nonzero_address(
+    env: &Env,
+    address: &Address,
+    empty_error: SettlementError,
+    zero_error: SettlementError,
+) {
+    if address.to_string().is_empty() {
         panic_with_error!(env, empty_error);
     }
-    let zero_address = String::from_str(
-        env,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
-    if address.to_string() == zero_address {
+    if storage::is_zero_address(env, address) {
         panic_with_error!(env, zero_error);
     }
 }
@@ -1068,14 +1102,6 @@ fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
         }),
         _ => None,
     }
-}
-
-/// Returns whether the contract is currently paused.
-fn is_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false)
 }
 
 /// Ensures the contract is not paused before mutating state or performing privileged actions.

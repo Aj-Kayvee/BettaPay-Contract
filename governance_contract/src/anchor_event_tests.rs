@@ -1,18 +1,7 @@
 use soroban_sdk::testutils::{Address as _, Events};
-use soroban_sdk::{Address, Env, FromVal, Symbol};
+use soroban_sdk::{Address, FromVal, Symbol};
 
 use super::*;
-
-fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-    let admin = Address::generate(&env);
-    let recovery_address = Address::generate(&env);
-    let contract_id = env.register_contract(None, GovernanceContract);
-    let client = GovernanceContractClient::new(&env, &contract_id);
-    client.init(&admin, &recovery_address);
-    (env, client, admin)
-}
 
 #[test]
 fn upsert_anchor_emits_anchor_upserted_event() {

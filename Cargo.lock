@@ -87,6 +87,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d809780667f4410e7c41b07f52439b94d2bdf8528eeedc287fa38d3b7f95d82"
 
 [[package]]
+name = "bettapay_common"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1148,6 +1155,7 @@ dependencies = [
 name = "settlement_contract"
 version = "0.1.0"
 dependencies = [
+ "bettapay_common",
  "proptest",
  "soroban-sdk",
 ]
