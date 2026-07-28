@@ -416,25 +416,29 @@ impl GovernanceContract {
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
-    /// * `_caller` - Unused parameter; authorisation is enforced via the stored admin.
+    /// * `caller` - Must be the stored administrator.
     /// * `new_admin` - The address to become the new administrator.
     ///
     /// # Authorization
     ///
-    /// Requires authorisation from the current stored administrator.
+    /// Requires `caller == admin` and authentication from `caller`.
     ///
     /// # Effects
     ///
-    /// Overwrites `DataKey::Admin` in instance storage and emits an `admin` event
-    /// carrying the new administrator address.
+    /// Overwrites `DataKey::Admin` in instance storage and emits an `admin_transferred`
+    /// event carrying the old and new administrator addresses.
     ///
     /// # Errors
     ///
+    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the stored administrator.
     /// Panics with `GovernanceError::InvalidAdmin` if `new_admin` is the zero address
     /// or is identical to the current administrator.
-    pub fn transfer_admin(env: Env, _caller: Address, new_admin: Address) {
+    pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
         let admin = read_admin(&env);
-        admin.require_auth();
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
 
         validate_nonzero_address(&env, &new_admin, GovernanceError::InvalidAdmin);
 
@@ -443,7 +447,6 @@ impl GovernanceContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -1308,6 +1311,18 @@ mod tests {
     fn rejects_same_admin_transfer() {
         let (_env, client, admin) = setup();
         client.transfer_admin(&admin, &admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn rejects_transfer_admin_from_non_admin_caller() {
+        let (env, client, _admin) = setup();
+        let non_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        // caller (non_admin) != stored admin — transfer_admin must reject with
+        // GovernanceError::Unauthorized before reaching require_auth().
+        client.transfer_admin(&non_admin, &new_admin);
     }
 
     #[test]
