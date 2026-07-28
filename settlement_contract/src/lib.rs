@@ -248,6 +248,8 @@ pub struct PendingRecovery {
 enum DataKey {
     /// Instance — singleton, read on every mutating call.
     Admin,
+    /// Instance — singleton u32 threshold for multisig operations.
+    Threshold,
     /// Instance — singleton address, rarely changes.
     RecoveryAddress,
     /// Instance — singleton boolean flag, read on every mutating call.
@@ -319,6 +321,8 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// The provided multisig threshold is invalid.
+    InvalidThreshold = 22,
 }
 
 #[contract]
@@ -331,11 +335,11 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
-    pub fn init(env: Env, admin: Address, governance: Address, recovery_address: Address) {
+    pub fn init(env: Env, admins: Vec<Address>, threshold: u32, governance: Address, recovery_address: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
         }
-        admin.require_auth();
+        validate_admins_and_threshold(&env, &admins, threshold);
         validate_governance(&env, &governance);
         validate_nonzero_address(
             &env,
@@ -343,7 +347,11 @@ impl SettlementContract {
             SettlementError::InvalidRecoveryAddress,
             SettlementError::InvalidRecoveryAddress,
         );
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        for i in 0..threshold {
+            admins.get(i).unwrap().require_auth();
+        }
+        env.storage().instance().set(&DataKey::Admin, &admins);
+        env.storage().instance().set(&DataKey::Threshold, &threshold);
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
@@ -352,13 +360,16 @@ impl SettlementContract {
             .set(&DataKey::RecoveryAddress, &recovery_address);
     }
 
-    /// Return the current admin address.
-    ///
-    /// # Panics
-    ///
-    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    pub fn get_admin(env: Env) -> Address {
-        read_admin(&env)
+    pub fn is_initialized(env: Env) -> bool {
+        env.storage().instance().has(&DataKey::Admin)
+    }
+
+    pub fn get_admin(env: Env) -> Vec<Address> {
+        read_admins(&env)
+    }
+
+    pub fn get_threshold(env: Env) -> u32 {
+        read_threshold(&env)
     }
 
     pub fn get_governance(env: Env) -> Address {
@@ -369,11 +380,11 @@ impl SettlementContract {
         read_recovery_address(&env)
     }
 
-    pub fn update_governance(env: Env, new_governance: Address) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn update_governance(env: Env, signers: Vec<Address>, new_governance: Address) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
         assert_not_paused(&env);
         validate_governance(&env, &new_governance);
+        let admin = signers.get(0).unwrap();
         env.storage()
             .instance()
             .set(&DataKey::Governance, &new_governance);
@@ -401,9 +412,9 @@ impl SettlementContract {
         );
     }
 
-    pub fn cancel_recovery(env: Env) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn cancel_recovery(env: Env, signers: Vec<Address>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
         if !env.storage().instance().has(&DataKey::PendingRecovery) {
             panic_with_error!(&env, SettlementError::RecoveryNotPending);
         }
@@ -418,49 +429,43 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::RecoveryDelayActive);
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Admin, &pending.new_admin);
+        let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
+        env.storage().instance().set(&DataKey::Admin, &new_admins);
+        env.storage().instance().set(&DataKey::Threshold, &1u32);
         env.storage().instance().remove(&DataKey::PendingRecovery);
         env.events()
             .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
     }
 
-    /// Transfer the admin role to a new address.
-    ///
-    /// # Panics
-    ///
-    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`EmptyAddress`](SettlementError::EmptyAddress) — if `new_admin` is an empty string.
-    /// * [`ZeroAddress`](SettlementError::ZeroAddress) — if `new_admin` is the zero address.
-    /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
-    ///
-    /// ## Emitted Event: `admin`
-    ///
-    /// **Topics**: `(Symbol("admin"),)`
-    /// **Data**: `Address new_admin`
-    pub fn transfer_admin(env: Env, new_admin: Address) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admins: Vec<Address>, new_threshold: u32) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        validate_admins_and_threshold(&env, &new_admins, new_threshold);
 
-        validate_nonzero_address(&env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
-
-        if new_admin == admin {
-            panic_with_error!(&env, SettlementError::InvalidAdmin);
-        }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish((symbol_short!("admin"),), new_admin);
+        env.storage().instance().set(&DataKey::Admin, &new_admins);
+        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        let primary_new_admin = new_admins.get(0).unwrap();
+        env.events().publish((symbol_short!("admin"),), primary_new_admin);
     }
 
-    /// Upgrades the underlying Wasm bytecode implementation of the contract under strict admin authority.
-    ///
-    /// # Panics
-    ///
-    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the registered admin.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn change_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
+        let current_threshold = read_threshold(&env);
+        verify_admin_auth(&env, &signers, current_threshold + 1);
+
+        let admins = read_admins(&env);
+        if new_threshold == 0 || new_threshold > admins.len() {
+            panic_with_error!(&env, SettlementError::InvalidThreshold);
+        }
+
+        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        env.events().publish(
+            (Symbol::new(&env, "threshold_changed"),),
+            (current_threshold, new_threshold),
+        );
+    }
+
+    pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
         env.events().publish(
             (
@@ -473,62 +478,29 @@ impl SettlementContract {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    /// Pause the contract, preventing certain operations.
-    ///
-    /// # Panics
-    ///
-    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
-    ///
-    /// ## Emitted Event: `pause`
-    ///
-    /// **Topics**: `(Symbol("pause"),)`
-    /// **Data**: `bool true`
-    pub fn pause(env: Env) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish((symbol_short!("pause"),), true);
     }
 
-    /// Unpause the contract, re-enabling paused operations.
-    ///
-    /// # Panics
-    ///
-    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
-    ///
-    /// ## Emitted Event: `unpause`
-    ///
-    /// **Topics**: `(Symbol("unpause"),)`
-    /// **Data**: `bool false`
-    pub fn unpause(env: Env) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("unpause"),), false);
     }
 
-    /// Returns `true` if the contract is currently paused, `false` otherwise.
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
     }
 
-    /// ## Emitted Event: `merchant_registered`
-    ///
-    /// **Topics**: `(Symbol("merchant_registered"), Address merchant)`
-    /// - First topic: fixed event-name symbol for filtering by event type
-    /// - Second topic: the merchant address that was registered
-    ///
-    /// **Data**: `Address caller`
-    /// - `caller`: the admin who authorized the registration
-    pub fn register_merchant(env: Env, merchant: Address) {
+    pub fn register_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
         assert_not_paused(&env);
 
         validate_nonzero_address(&env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
 
-        let admin = read_admin(&env);
-        admin.require_auth();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
         let key = DataKey::Merchant(merchant.clone());
         if env.storage().persistent().has(&key) {
@@ -543,39 +515,10 @@ impl SettlementContract {
             .publish((Symbol::new(&env, "merchant_registered"), merchant), admin);
     }
 
-    /// Remove a merchant from the registry and clear any associated settlement rule.
-    ///
-    /// # Panics
-    ///
-    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
-    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    ///
-    /// ## Emitted Events
-    ///
-    /// If the merchant has a settlement rule set, a `settlement_rule_cleared`
-    /// event is emitted before the `merchant_unregistered` event.
-    ///
-    /// ### `settlement_rule_cleared` (conditional)
-    ///
-    /// **Topics**: `(Symbol("settlement_rule_cleared"), Address merchant)`
-    ///
-    /// **Data**: `(Address caller, SettlementRule removed)`
-    /// - `caller`: the admin who authorized the unregistration
-    /// - `removed`: the settlement rule that was removed
-    ///
-    /// ### `merchant_unregistered`
-    ///
-    /// **Topics**: `(Symbol("merchant_unregistered"), Address merchant)`
-    /// - First topic: fixed event-name symbol for filtering by event type
-    /// - Second topic: the merchant address that was unregistered
-    ///
-    /// **Data**: `Address caller`
-    /// - `caller`: the admin who authorized the unregistration
-    pub fn unregister_merchant(env: Env, merchant: Address) {
+    pub fn unregister_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
         assert_not_paused(&env);
-        let admin = read_admin(&env);
-        admin.require_auth();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
         let key = DataKey::Merchant(merchant.clone());
         if !env.storage().persistent().has(&key) {
@@ -600,20 +543,10 @@ impl SettlementContract {
         );
     }
 
-    /// ## Emitted Event: `settlement_rule_updated`
-    ///
-    /// **Topics**: `(Symbol("settlement_rule_updated"), Address rule_id)`
-    /// - First topic: fixed event-name symbol for filtering by event type
-    /// - Second topic: the merchant address identifying which rule was updated
-    ///
-    /// **Data**: `(Address caller, SettlementRule previous, SettlementRule current)`
-    /// - `caller`: the admin who authorized the rule change
-    /// - `previous`: the rule values before the update (or system defaults on first set)
-    /// - `current`: the new rule values after the update
-    pub fn set_settlement_rule(env: Env, merchant: Address, rule: SettlementRule) {
+    pub fn set_settlement_rule(env: Env, signers: Vec<Address>, merchant: Address, rule: SettlementRule) {
         assert_not_paused(&env);
-        let admin = read_admin(&env);
-        admin.require_auth();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -650,20 +583,10 @@ impl SettlementContract {
         );
     }
 
-    /// ## Emitted Event: `settlement_rule_cleared`
-    ///
-    /// **Topics**: `(Symbol("settlement_rule_cleared"), Address rule_id)`
-    /// - First topic: fixed event-name symbol for filtering by event type
-    /// - Second topic: the merchant address identifying which rule was cleared
-    ///
-    /// **Data**: `(Address caller, SettlementRule removed, SettlementRule fallback)`
-    /// - `caller`: the admin who authorized the removal
-    /// - `removed`: the rule values that were removed from storage
-    /// - `fallback`: the effective rule the merchant will use after clearing (global default or bootstrap)
-    pub fn clear_settlement_rule(env: Env, merchant: Address) {
+    pub fn clear_settlement_rule(env: Env, signers: Vec<Address>, merchant: Address) {
         assert_not_paused(&env);
-        let admin = read_admin(&env);
-        admin.require_auth();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
         let key = DataKey::Rule(merchant.clone());
         let removed = env
@@ -682,27 +605,10 @@ impl SettlementContract {
         );
     }
 
-    /// ## Emitted Event: `default_rule_updated`
-    ///
-    /// **Topics**: `(Symbol("default_rule_updated"),)`
-    /// - First topic: fixed event-name symbol for filtering by event type
-    ///
-    /// **Data**: `(Address caller, SettlementRule previous, SettlementRule current)`
-    /// - `caller`: the admin who authorized the change
-    /// - `previous`: the previous global default rule (or bootstrap fallback if none was set)
-    /// - `current`: the new global default rule
-    /// ## Event: `default_rule_updated`
-    ///
-    /// Emitted when the global default settlement rule is updated.
-    ///
-    /// ## Panics
-    ///
-    /// - Panics with `InvalidSettlementDelay` if `new_rule.settlement_delay_ledger`
-    ///   exceeds `MAX_SETTLEMENT_DELAY_LEDGER`.
-    pub fn set_default_rule(env: Env, new_rule: SettlementRule) {
+    pub fn set_default_rule(env: Env, signers: Vec<Address>, new_rule: SettlementRule) {
         assert_not_paused(&env);
-        let admin = read_admin(&env);
-        admin.require_auth();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
         if new_rule.platform_fee_bps > BPS_DENOMINATOR || new_rule.network_fee_bps > BPS_DENOMINATOR
         {
@@ -906,13 +812,63 @@ impl SettlementContract {
     }
 }
 
-/// Reads the configured admin address and refreshes the instance TTL so it remains available.
-fn read_admin(env: &Env) -> Address {
+fn read_admins(env: &Env) -> Vec<Address> {
     env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
+}
+
+fn read_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::Threshold)
+        .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
+}
+
+fn validate_admins_and_threshold(env: &Env, admins: &Vec<Address>, threshold: u32) {
+    if threshold == 0 || threshold > admins.len() {
+        panic_with_error!(env, SettlementError::InvalidThreshold);
+    }
+    if admins.is_empty() {
+        panic_with_error!(env, SettlementError::InvalidAdmin);
+    }
+    for i in 0..admins.len() {
+        let admin = admins.get(i).unwrap();
+        validate_nonzero_address(env, &admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        for j in (i + 1)..admins.len() {
+            if admin == admins.get(j).unwrap() {
+                panic_with_error!(env, SettlementError::InvalidAdmin);
+            }
+        }
+    }
+}
+
+fn verify_admin_auth(env: &Env, signers: &Vec<Address>, required_count: u32) {
+    let admins = read_admins(env);
+    if (signers.len() as u32) < required_count {
+        panic_with_error!(env, SettlementError::Unauthorized);
+    }
+    for i in 0..signers.len() {
+        let signer = signers.get(i).unwrap();
+        let mut is_admin = false;
+        for j in 0..admins.len() {
+            if signer == admins.get(j).unwrap() {
+                is_admin = true;
+                break;
+            }
+        }
+        if !is_admin {
+            panic_with_error!(env, SettlementError::Unauthorized);
+        }
+        for j in (i + 1)..signers.len() {
+            if signer == signers.get(j).unwrap() {
+                panic_with_error!(env, SettlementError::Unauthorized);
+            }
+        }
+        signer.require_auth();
+    }
 }
 
 fn read_governance(env: &Env) -> Address {
