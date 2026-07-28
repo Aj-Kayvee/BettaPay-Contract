@@ -754,7 +754,8 @@ impl GovernanceContract {
         }
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
-        env.storage().persistent().set(&key, &anchor.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
+        env.storage().persistent().set(&key, &anchor);
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events().publish(
             (Symbol::new(&env, "anchor_upserted"), asset),
