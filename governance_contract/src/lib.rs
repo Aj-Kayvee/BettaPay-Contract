@@ -168,32 +168,32 @@ enum DataKey {
     /// Uses instance storage because access control needs to share the contract's lifetime
     /// and requires fast, guaranteed access on almost every privileged invocation.
     Admin,
-    
+
     /// Storage key for the recovery address that can reset the admin.
     /// Uses instance storage because it's a core access control mechanism
     /// that shares the contract's lifetime.
     RecoveryAddress,
-    
+
     /// Storage key for the pending recovery operation.
     /// Uses instance storage because it's temporary access control state
     /// tied directly to the contract instance.
     PendingRecovery,
-    
+
     /// Storage key for arbitrary system parameters.
     /// Uses persistent storage because there may be an unbounded number of parameters
     /// that require independent rent management.
     SystemParam(Symbol),
-    
+
     /// Storage key for the fee configuration data.
     /// Uses persistent storage because fee parameters don't need to block instance
     /// execution if they expire, and they can be managed via separate rent lifecycles.
     FeeConfig,
-    
+
     /// Storage key for the anchor address associated with a specific asset.
     /// Uses persistent storage because the number of supported assets can grow indefinitely,
     /// so each anchor must manage its own rent rather than bloating the instance storage.
     Anchor(Address),
-    
+
     /// Storage key for the pause state flag.
     /// Uses instance storage because the pause state dictates whether the contract
     /// functions at all, needing cheap, guaranteed access just like the Admin key.
@@ -726,8 +726,10 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
-        env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), (old_anchor, anchor));
+        env.events().publish(
+            (Symbol::new(&env, "anchor_upserted"), asset),
+            (old_anchor, anchor),
+        );
     }
 
     /// Removes the anchor configuration for the given asset.
@@ -841,7 +843,7 @@ fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    if address.to_string() == zero_address {
+    if address.to_string().len() == 0 || address.to_string() == zero_address {
         panic_with_error!(env, error);
     }
 }
@@ -953,6 +955,15 @@ mod tests {
         );
 
         client.transfer_admin(&admin, &zero_address);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
+    fn governance_rejects_empty_address_admin_transfer() {
+        let (env, client, admin) = setup();
+        let empty_address = Address::from_string(&soroban_sdk::String::from_str(&env, ""));
+
+        client.transfer_admin(&admin, &empty_address);
     }
 
     #[test]
