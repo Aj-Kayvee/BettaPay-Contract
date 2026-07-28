@@ -160,8 +160,8 @@ pub struct SettlementRule {
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeSplit {
-    /// The total gross amount of the payment before any fees are deducted.
-    /// Mirrors the input amount for caller convenience — not independently meaningful.
+    /// The total gross amount of the payment.
+    /// Mirrors the `amount` parameter passed to `store_payment_reference`.
     pub gross_amount: i128,
     /// Portion of the settlement fee allocated to the platform.
     /// This amount is calculated by applying the platform fee basis points to the gross amount.
