@@ -50,6 +50,16 @@
 //! internal `assert_not_paused` guard. The contract is re-enabled with
 //! [`GovernanceContract::unpause`], which emits an `unpaused` event.
 //!
+//! ## Pause Model
+//! The pause flag blocks payment-processing and merchant-management operations.
+//! The following administrative operations are intentionally NOT blocked
+//! during pause, so the admin can fix the root cause of the emergency:
+//! - `upgrade` — deploy a fix
+//! - `transfer_admin` — rotate compromised keys
+//! - `update_system_param` — adjust system configuration
+//! - `set_fee_config` — update fee parameters
+//! All other mutating functions check the pause flag via assert_not_paused().
+//!
 //! ### Fee Configuration
 //! [`GovernanceContract::set_fee_config`] stores a [`FeeConfig`] struct that
 //! expresses platform and network fees in basis points (bps, 1 bps = 0.01 %).
