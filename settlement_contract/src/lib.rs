@@ -73,7 +73,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address,
     BytesN, Env, String, Symbol, Val, Vec,
 };
 use soroban_sdk::testutils::storage::Persistent;
@@ -371,7 +371,7 @@ impl SettlementContract {
     ///
     /// ## Emitted Event: `admin`
     ///
-    /// **Topics**: `(Symbol("admin"),)`
+    /// **Topics**: `(Symbol("admin_transferred"),)`
     /// **Data**: `Address new_admin`
     pub fn transfer_admin(env: Env, new_admin: Address) {
         let admin = read_admin(&env);
@@ -391,7 +391,7 @@ impl SettlementContract {
         }
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.events().publish((symbol_short!("admin"),), new_admin);
+        env.events().publish((Symbol::new(&env, "admin_transferred"),), new_admin);
     }
 
     /// Upgrades the underlying Wasm bytecode implementation of the contract under strict admin authority.
@@ -421,13 +421,13 @@ impl SettlementContract {
     ///
     /// ## Emitted Event: `pause`
     ///
-    /// **Topics**: `(Symbol("pause"),)`
+    /// **Topics**: `(Symbol("paused"),)`
     /// **Data**: `bool true`
     pub fn pause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((symbol_short!("pause"),), true);
+        env.events().publish((Symbol::new(&env, "paused"),), true);
     }
 
     /// Unpause the contract, re-enabling paused operations.
@@ -439,13 +439,13 @@ impl SettlementContract {
     ///
     /// ## Emitted Event: `unpause`
     ///
-    /// **Topics**: `(Symbol("unpause"),)`
+    /// **Topics**: `(Symbol("unpaused"),)`
     /// **Data**: `bool false`
     pub fn unpause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((symbol_short!("unpause"),), false);
+        env.events().publish((Symbol::new(&env, "unpaused"),), false);
     }
 
     /// Returns `true` if the contract is currently paused, `false` otherwise.
@@ -3166,7 +3166,7 @@ mod tests {
         assert_eq!(topics.len(), 1);
         assert_eq!(
             Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "admin")
+            Symbol::new(&env, "admin_transferred")
         );
         assert_eq!(Address::from_val(&env, &data), new_admin);
     }
