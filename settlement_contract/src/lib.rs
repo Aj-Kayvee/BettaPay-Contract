@@ -378,6 +378,8 @@ pub enum SettlementError {
     OperationNotScheduled = 23,
     /// The operation has already been scheduled.
     OperationAlreadyScheduled = 24,
+    /// The deployed WASM does not implement the required interface.
+    InvalidWasmInterface = 25,
 }
 
 #[contract]
@@ -385,6 +387,9 @@ pub struct SettlementContract;
 
 #[contractimpl]
 impl SettlementContract {
+    pub fn supports_interface(_env: Env, version: u32) -> bool {
+        version == 1
+    }
     /// Initialize the contract with the given admin address.
     ///
     /// # Panics
@@ -549,6 +554,24 @@ impl SettlementContract {
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let admin = read_admin(&env);
         admin.require_auth();
+
+        let salt = BytesN::from_array(&env, &[0u8; 32]);
+        let temp_contract = env
+            .deployer()
+            .with_current_contract(salt)
+            .deploy(new_wasm_hash.clone());
+        let args: Vec<Val> = Vec::from_array(&env, [1u32.into_val(&env)]);
+        let is_supported: bool = match env.try_invoke_contract::<bool, soroban_sdk::ConversionError>(
+            &temp_contract,
+            &Symbol::new(&env, "supports_interface"),
+            args,
+        ) {
+            Ok(Ok(val)) => val,
+            _ => false,
+        };
+        if !is_supported {
+            panic_with_error!(&env, SettlementError::InvalidWasmInterface);
+        }
 
         let event_wasm_hash = new_wasm_hash.clone();
         env.events().publish(

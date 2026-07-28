@@ -301,12 +301,8 @@ pub enum GovernanceError {
     OperationNotScheduled = 15,
     /// The operation has already been scheduled.
     OperationAlreadyScheduled = 16,
-    /// The scheduled operation is not yet ready for execution.
-    ExecutionNotReady = 14,
-    /// The operation has not been scheduled.
-    OperationNotScheduled = 15,
-    /// The operation has already been scheduled.
-    OperationAlreadyScheduled = 16,
+    /// The deployed WASM does not implement the required interface.
+    InvalidWasmInterface = 17,
 }
 
 #[contract]
@@ -314,6 +310,10 @@ pub struct GovernanceContract;
 
 #[contractimpl]
 impl GovernanceContract {
+    pub fn supports_interface(_env: Env, version: u32) -> bool {
+        version == 1
+    }
+
     /// Initialises the governance contract and sets the initial administrator.
     ///
     /// Must be called exactly once after deployment. The caller is recorded as the
@@ -410,6 +410,25 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
+
+        let salt = BytesN::from_array(&env, &[0u8; 32]);
+        let temp_contract = env
+            .deployer()
+            .with_current_contract(salt)
+            .deploy(new_wasm_hash.clone());
+        let args: Vec<Val> = Vec::from_array(&env, [1u32.into_val(&env)]);
+        let is_supported: bool = match env.try_invoke_contract::<bool, soroban_sdk::ConversionError>(
+            &temp_contract,
+            &Symbol::new(&env, "supports_interface"),
+            args,
+        ) {
+            Ok(Ok(val)) => val,
+            _ => false,
+        };
+        if !is_supported {
+            panic_with_error!(&env, GovernanceError::InvalidWasmInterface);
+        }
+
         let event_wasm_hash = new_wasm_hash.clone();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         env.events().publish(
@@ -1236,7 +1255,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn upload_test_wasm(env: &Env) -> BytesN<32> {
-        let wasm = Bytes::from_slice(env, &[]);
+        let wasm = Bytes::from_slice(env, GovernanceContract::WASM);
         env.deployer().upload_contract_wasm(wasm)
     }
 
@@ -1250,6 +1269,15 @@ mod tests {
         // Ensure the upgraded contract remains callable and retains its state.
         let upgraded_client = GovernanceContractClient::new(&env, &client.address);
         assert_eq!(upgraded_client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #17)")]
+    fn governance_rejects_upgrade_with_invalid_wasm_interface() {
+        let (env, client, admin) = setup();
+        let wasm = Bytes::from_slice(&env, &[]);
+        let invalid_wasm_hash = env.deployer().upload_contract_wasm(wasm);
+        client.upgrade(&admin, &invalid_wasm_hash);
     }
 
     #[test]
