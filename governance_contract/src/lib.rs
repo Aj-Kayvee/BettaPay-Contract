@@ -167,6 +167,21 @@ use soroban_sdk::{
     Symbol, SymbolStr, TryFromVal,
 };
 
+/// Minimum allowed fee in basis points (0.05%).
+const MIN_FEE_BPS: u32 = 5;
+/// Maximum allowed fee in basis points (50%).
+const MAX_FEE_BPS: u32 = 5_000;
+const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
+const FEE_TTL_BUMP: u32 = 17280 * 30;
+const ANCHOR_TTL_THRESHOLD: u32 = 17280 * 14;
+const ANCHOR_TTL_BUMP: u32 = 17280 * 30;
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
+const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
+const ADMIN_TTL_THRESHOLD: u32 = 17280 * 14;
+const ADMIN_TTL_BUMP: u32 = 17280 * 30;
+const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+const DEFAULT_TIMELOCK_DELAY_SECONDS: u64 = 2 * 24 * 60 * 60; // 48 hours
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeConfig {
@@ -204,6 +219,30 @@ const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 // contract's own storage without a migration.
 #[derive(Clone)]
 #[contracttype]
+pub enum Operation {
+    Upgrade(BytesN<32>),
+    TransferAdmin(Address),
+    CancelRecovery,
+    UpdateSystemParam(Symbol, i128),
+    SetFeeConfig(FeeConfig),
+    UpsertAnchor(Address, Address),
+    RemoveAnchor(Address),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum Operation {
+    Upgrade(BytesN<32>),
+    TransferAdmin(Address),
+    CancelRecovery,
+    UpdateSystemParam(Symbol, i128),
+    SetFeeConfig(FeeConfig),
+    UpsertAnchor(Address, Address),
+    RemoveAnchor(Address),
+}
+
+#[derive(Clone)]
+#[contracttype]
 enum DataKey {
     /// Storage key for arbitrary system parameters.
     /// Uses persistent storage because there may be an unbounded number of parameters
@@ -219,6 +258,15 @@ enum DataKey {
     /// Uses persistent storage because the number of supported assets can grow indefinitely,
     /// so each anchor must manage its own rent rather than bloating the instance storage.
     Anchor(Address),
+
+    /// Storage key for the pause state flag.
+    /// Uses instance storage because the pause state dictates whether the contract
+    /// functions at all, needing cheap, guaranteed access just like the Admin key.
+    Paused,
+
+    /// Storage key for a scheduled operation.
+    /// Uses persistent storage, keyed by operation hash, to store execution timestamp.
+    ScheduledOperation(BytesN<32>),
 }
 
 #[contracterror]
@@ -247,6 +295,18 @@ pub enum GovernanceError {
     AlreadyPaused = 12,
     /// `unpause` was called while the contract was already unpaused.
     AlreadyUnpaused = 13,
+    /// The scheduled operation is not yet ready for execution.
+    ExecutionNotReady = 14,
+    /// The operation has not been scheduled.
+    OperationNotScheduled = 15,
+    /// The operation has already been scheduled.
+    OperationAlreadyScheduled = 16,
+    /// The scheduled operation is not yet ready for execution.
+    ExecutionNotReady = 14,
+    /// The operation has not been scheduled.
+    OperationNotScheduled = 15,
+    /// The operation has already been scheduled.
+    OperationAlreadyScheduled = 16,
 }
 
 #[contract]
@@ -464,10 +524,99 @@ impl GovernanceContract {
         );
     }
 
+    /// Schedules an administrative operation to be executed after a timelock using Operation enum.
+    pub fn schedule(env: Env, caller: Address, operation: Operation, execute_in: u64) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let timelock_delay = DEFAULT_TIMELOCK_DELAY_SECONDS;
+        if execute_in < timelock_delay {
+            panic_with_error!(&env, GovernanceError::ExecutionNotReady);
+        }
+
+        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let key = DataKey::ScheduledOperation(op_hash.clone());
+
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, GovernanceError::OperationAlreadyScheduled);
+        }
+
+        let execute_at = env.ledger().timestamp() + execute_in;
+        env.storage().persistent().set(&key, &execute_at);
+        env.storage().persistent().extend_ttl(&key, 17280 * 14, 17280 * 30);
+
+        env.events().publish(
+            (Symbol::new(&env, "op_scheduled"), op_hash),
+            (caller, execute_at),
+        );
+    }
+
+    /// Executes a previously scheduled administrative operation specified by Operation enum.
+    pub fn execute(env: Env, operation: Operation) {
+        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let key = DataKey::ScheduledOperation(op_hash.clone());
+
+        let execute_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, GovernanceError::OperationNotScheduled));
+
+        if env.ledger().timestamp() < execute_at {
+            panic_with_error!(&env, GovernanceError::ExecutionNotReady);
+        }
+
+        env.storage().persistent().remove(&key);
+
+        match operation {
+            Operation::Upgrade(wasm_hash) => Self::_upgrade(&env, wasm_hash),
+            Operation::TransferAdmin(new_admin) => Self::_transfer_admin(&env, new_admin),
+            Operation::CancelRecovery => {
+                let admin = read_admin(&env);
+                admin.require_auth();
+                Self::_cancel_recovery(&env)
+            }
+            Operation::UpdateSystemParam(param_key, value) => {
+                Self::_update_system_param(&env, param_key, value)
+            }
+            Operation::SetFeeConfig(config) => Self::_set_fee_config(&env, config),
+            Operation::UpsertAnchor(asset, anchor) => Self::_upsert_anchor(&env, asset, anchor),
+            Operation::RemoveAnchor(asset) => Self::_remove_anchor(&env, asset),
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "op_executed"), op_hash), ());
+    }
+
+    /// Cancels a scheduled administrative operation specified by Operation enum.
+    pub fn cancel(env: Env, caller: Address, operation: Operation) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let key = DataKey::ScheduledOperation(op_hash.clone());
+
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, GovernanceError::OperationNotScheduled);
+        }
+
+        env.storage().persistent().remove(&key);
+
+        env.events()
+            .publish((Symbol::new(&env, "op_cancelled"), op_hash), caller);
+    }
+    
     /// Pauses the contract, blocking all state-mutating operations.
     ///
     /// While paused, any function guarded by `assert_not_paused` will reject
     /// incoming transactions. Intended for emergency use by the administrator.
+    /// This operation bypasses the timelock.
     ///
     /// # Arguments
     ///
@@ -503,6 +652,7 @@ impl GovernanceContract {
     /// Resumes normal contract operation after a pause.
     ///
     /// Clears the paused state so that state-mutating operations can proceed again.
+    /// This operation bypasses the timelock.
     ///
     /// # Arguments
     ///
@@ -842,6 +992,111 @@ impl GovernanceContract {
                 .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         }
         result
+    }
+
+    // --- Internal Admin Functions ---
+
+    fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
+        let admin = read_admin(env);
+        let event_wasm_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(env, "contract_upgraded"), event_wasm_hash),
+            admin,
+        );
+    }
+    
+    fn _transfer_admin(env: &Env, new_admin: Address) {
+        let admin = read_admin(env);
+        validate_nonzero_address(env, &new_admin, GovernanceError::InvalidAdmin);
+        if admin == new_admin {
+            panic_with_error!(env, GovernanceError::InvalidAdmin);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin: admin,
+                new_admin,
+            },
+        );
+    }
+    
+    fn _cancel_recovery(env: &Env) {
+        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+            panic_with_error!(env, GovernanceError::RecoveryNotPending);
+        }
+        let admin = read_admin(env);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.events()
+            .publish((Symbol::new(env, "recovery_cancelled"),), admin);
+    }
+    
+    fn _update_system_param(env: &Env, key: Symbol, value: i128) {
+        assert_not_paused(env);
+        if key.to_string().len() > 32 {
+            panic_with_error!(env, GovernanceError::InvalidParamValue);
+        }
+        if value < 0 {
+            panic_with_error!(env, GovernanceError::InvalidParamValue);
+        }
+
+        let storage_key = DataKey::SystemParam(key.clone());
+        let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
+        env.storage().persistent().set(&storage_key, &value);
+    
+        let admin = read_admin(env);
+        env.events().publish(
+            (Symbol::new(env, "sys_param_updated"), key),
+            (admin, previous_value, value),
+        );
+    }
+
+     fn _set_fee_config(env: &Env, config: FeeConfig) {
+        assert_not_paused(env);
+        if config.platform_fee_bps < MIN_FEE_BPS
+            || config.platform_fee_bps > MAX_FEE_BPS
+            || config.network_fee_bps < MIN_FEE_BPS
+            || config.network_fee_bps > MAX_FEE_BPS
+        {
+            panic_with_error!(env, GovernanceError::InvalidFeeBps);
+        }
+        if config.platform_fee_bps + config.network_fee_bps > 10_000 {
+            panic_with_error!(env, GovernanceError::InvalidFeeBps);
+        }
+    
+        let key = DataKey::FeeConfig;
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
+
+        let admin = read_admin(env);
+        env.events()
+            .publish((Symbol::new(env, "fee_config_updated"),), (admin, config));
+    }
+    
+    fn _upsert_anchor(env: &Env, asset: Address, anchor: Address) {
+        assert_not_paused(env);
+        let key = DataKey::Anchor(asset.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
+        env.storage().persistent().set(&key, &anchor.clone());
+        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+        env.events().publish(
+            (Symbol::new(env, "anchor_upserted"), asset),
+            (old_anchor, anchor),
+        );
+    }
+    
+    fn _remove_anchor(env: &Env, asset: Address) {
+        assert_not_paused(env);
+        let key = DataKey::Anchor(asset.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(env, GovernanceError::AnchorMissing);
+        }
+        env.storage().persistent().remove(&key);
+        env.events()
+            .publish((Symbol::new(env, "anchor_removed"), asset), ());
     }
 }
 
