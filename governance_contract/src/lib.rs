@@ -911,7 +911,7 @@ mod tests {
         let zero_address = Address::from_str(
             &env,
             "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
+        );
 
         client.transfer_admin(&admins, &vec![&env, zero_address], &1);
     }
