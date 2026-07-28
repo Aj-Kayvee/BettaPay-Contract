@@ -260,7 +260,8 @@ pub enum SettlementError {
     /// and `unregister_merchant` when the merchant is missing.
     MerchantMissing = 5,
     /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
-    /// exceeds 10 000. Raised by `set_settlement_rule` and `set_default_rule`.
+    /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
+    /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
     /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
     /// in `calculate_fee_split`.
@@ -1938,6 +1939,20 @@ mod tests {
         let bad_rule = SettlementRule {
             platform_fee_bps: 6_000,
             network_fee_bps: 5_000,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &bad_rule);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rejects_settlement_rule_below_governance_min_fee() {
+        let (_env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+        let bad_rule = SettlementRule {
+            platform_fee_bps: 4,
+            network_fee_bps: 0,
             settlement_delay_ledger: 0,
             auto_settle: false,
         };
