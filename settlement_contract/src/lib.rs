@@ -462,11 +462,9 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
+        let event_wasm_hash = new_wasm_hash.clone();
         env.events().publish(
-            (
-                Symbol::new(&env, "contract_upgraded"),
-                new_wasm_hash.clone(),
-            ),
+            (Symbol::new(&env, "contract_upgraded"), event_wasm_hash),
             admin,
         );
 
