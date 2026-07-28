@@ -263,9 +263,12 @@ pub enum SettlementError {
     Paused = 9,
     /// No merchant-specific rule has been set. The merchant will use the default rule or bootstrap fallback.
     MerchantRuleNotSet = 10,
-    /// The supplied address is the zero‑address or an empty string.
+    /// The supplied address is an empty string.
     /// Raised by `register_merchant` and `transfer_admin`.
-    InvalidAddress = 11,
+    EmptyAddress = 20,
+    /// The supplied address is the zero‑address.
+    /// Raised by `register_merchant` and `transfer_admin`.
+    ZeroAddress = 21,
     /// `store_payment_reference` was called with an all‑zero 32‑byte
     /// reference, which is reserved.
     InvalidPaymentReference = 12,
@@ -304,6 +307,7 @@ impl SettlementContract {
         validate_nonzero_address(
             &env,
             &recovery_address,
+            SettlementError::InvalidRecoveryAddress,
             SettlementError::InvalidRecoveryAddress,
         );
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -349,7 +353,7 @@ impl SettlementContract {
     pub fn initiate_recovery(env: Env, new_admin: Address) {
         let recovery_address = read_recovery_address(&env);
         recovery_address.require_auth();
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAdmin);
+        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAdmin, SettlementError::InvalidAdmin);
 
         let pending = PendingRecovery {
             new_admin: new_admin.clone(),
@@ -394,7 +398,8 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`InvalidAddress`](SettlementError::InvalidAddress) — if `new_admin` is the zero address.
+    /// * [`EmptyAddress`](SettlementError::EmptyAddress) — if `new_admin` is an empty string.
+    /// * [`ZeroAddress`](SettlementError::ZeroAddress) — if `new_admin` is the zero address.
     /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
     ///
     /// ## Emitted Event: `admin`
@@ -405,14 +410,7 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAddress);
-        let zero_addr: Address = Address::from_string(&soroban_sdk::String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
-        if new_admin == zero_addr {
-            panic_with_error!(&env, SettlementError::InvalidAddress);
-        }
+        validate_nonzero_address(&env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
 
         if new_admin == admin {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
@@ -491,7 +489,7 @@ impl SettlementContract {
     pub fn register_merchant(env: Env, merchant: Address) {
         assert_not_paused(&env);
 
-        validate_nonzero_address(&env, &merchant, SettlementError::InvalidAddress);
+        validate_nonzero_address(&env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
 
         let admin = read_admin(&env);
         admin.require_auth();
@@ -892,19 +890,22 @@ fn read_pending_recovery(env: &Env) -> PendingRecovery {
 }
 
 fn validate_governance(env: &Env, governance: &Address) {
-    validate_nonzero_address(env, governance, SettlementError::InvalidGovernance);
+    validate_nonzero_address(env, governance, SettlementError::InvalidGovernance, SettlementError::InvalidGovernance);
     let args: Vec<Val> = Vec::new(env);
     let _: Option<FeeConfig> =
         env.invoke_contract(governance, &Symbol::new(env, "get_fee_config"), args);
 }
 
-fn validate_nonzero_address(env: &Env, address: &Address, error: SettlementError) {
+fn validate_nonzero_address(env: &Env, address: &Address, empty_error: SettlementError, zero_error: SettlementError) {
+    if address.to_string().len() == 0 {
+        panic_with_error!(env, empty_error);
+    }
     let zero_address = String::from_str(
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    if address.to_string().len() == 0 || address.to_string() == zero_address {
-        panic_with_error!(env, error);
+    if address.to_string() == zero_address {
+        panic_with_error!(env, zero_error);
     }
 }
 
@@ -1229,6 +1230,14 @@ mod tests {
 
     #[test]
     #[should_panic]
+    fn rejects_empty_merchant_address() {
+        let (env, client, _admin, _merchant) = setup();
+        let empty_address = Address::from_string(&soroban_sdk::String::from_str(&env, ""));
+        client.register_merchant(&empty_address);
+    }
+
+    #[test]
+    #[should_panic]
     fn rejects_zero_address_admin_transfer() {
         let (env, client, _admin, _merchant) = setup();
         let zero_address = Address::from_string(&soroban_sdk::String::from_str(
@@ -1236,6 +1245,14 @@ mod tests {
             "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
         ));
         client.transfer_admin(&zero_address);
+    }
+
+    #[test]
+    #[should_panic]
+    fn rejects_empty_address_admin_transfer() {
+        let (env, client, _admin, _merchant) = setup();
+        let empty_address = Address::from_string(&soroban_sdk::String::from_str(&env, ""));
+        client.transfer_admin(&empty_address);
     }
 
     #[test]
