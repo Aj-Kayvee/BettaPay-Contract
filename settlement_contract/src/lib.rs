@@ -31,6 +31,29 @@
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
 //!
+//! ## Event Conventions
+//!
+//! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
+//! indexers a predictable topic layout, every event in this contract follows
+//! the same conventions:
+//!
+//! - `topic[0]` is always the event name as a [`Symbol`], constructed via
+//!   [`Symbol::new`] (or [`symbol_short!`] when the name fits in nine bytes).
+//!   Indexers filter on this single topic to dispatch by event type.
+//! - `topic[1..n]` carry the entity identifiers that scope the event —
+//!   typically an [`Address`] (merchant, asset, admin), but for some events
+//!   also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`, payment
+//!   reference on `payment_stored`). The exact shape of `topic[1..n]` is
+//!   fixed per event.
+//! - The **data payload** carries the values describing the state change.
+//!   Its shape is event-specific: a single value (`true` for `pause`,
+//!   `admin` for `merchant_registered`), a tuple (e.g.
+//!   `(admin, prev, rule)` for `settlement_rule_updated`), a typed struct
+//!   such as the `SettlementRule` emitted on `bootstrap_fallback`, or `()`.
+//! - Each entry point emits exactly the events tied to the state change it
+//!   performs; no two events emitted by the same call describe the same
+//!   logical change.
+//!
 //! ## Upgrade Process
 //!
 //! [`SettlementContract::upgrade`] replaces the Wasm and nothing else. That is
@@ -100,11 +123,11 @@
 
 #![no_std]
 
+use soroban_sdk::testutils::storage::Persistent;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, String, Symbol, Val, Vec,
 };
-use soroban_sdk::testutils::storage::Persistent;
 
 const BPS_DENOMINATOR: u32 = 10_000;
 const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
@@ -160,8 +183,8 @@ pub struct SettlementRule {
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeSplit {
-    /// The total gross amount of the payment before any fees are deducted.
-    /// Mirrors the input amount for caller convenience — not independently meaningful.
+    /// The total gross amount of the payment.
+    /// Mirrors the `amount` parameter passed to `store_payment_reference`.
     pub gross_amount: i128,
     /// Portion of the settlement fee allocated to the platform.
     /// This amount is calculated by applying the platform fee basis points to the gross amount.
@@ -223,14 +246,23 @@ pub struct PendingRecovery {
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
+    /// Instance — singleton, read on every mutating call.
     Admin,
+    /// Instance — singleton address, rarely changes.
     RecoveryAddress,
+    /// Instance — singleton boolean flag, read on every mutating call.
     PendingRecovery,
+    /// Instance — singleton address, rarely changes.
     Governance,
+    /// Persistent — one per merchant, many entries.
     Merchant(Address),
+    /// Persistent — one per merchant, may expire.
     Rule(Address),
+    /// Persistent — single value but may be updated.
     DefaultRule,
+    /// Persistent — one per payment, high volume.
     Payment(BytesN<32>),
+    /// Instance — singleton boolean, read on every mutating call.
     Paused,
 }
 
@@ -251,7 +283,8 @@ pub enum SettlementError {
     /// and `unregister_merchant` when the merchant is missing.
     MerchantMissing = 5,
     /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
-    /// exceeds 10 000. Raised by `set_settlement_rule` and `set_default_rule`.
+    /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
+    /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
     /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
     /// in `calculate_fee_split`.
@@ -263,9 +296,12 @@ pub enum SettlementError {
     Paused = 9,
     /// No merchant-specific rule has been set. The merchant will use the default rule or bootstrap fallback.
     MerchantRuleNotSet = 10,
-    /// The supplied address is the zero‑address or an empty string.
+    /// The supplied address is an empty string.
     /// Raised by `register_merchant` and `transfer_admin`.
-    InvalidAddress = 11,
+    EmptyAddress = 20,
+    /// The supplied address is the zero‑address.
+    /// Raised by `register_merchant` and `transfer_admin`.
+    ZeroAddress = 21,
     /// `store_payment_reference` was called with an all‑zero 32‑byte
     /// reference, which is reserved.
     InvalidPaymentReference = 12,
@@ -304,6 +340,7 @@ impl SettlementContract {
         validate_nonzero_address(
             &env,
             &recovery_address,
+            SettlementError::InvalidRecoveryAddress,
             SettlementError::InvalidRecoveryAddress,
         );
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -349,7 +386,7 @@ impl SettlementContract {
     pub fn initiate_recovery(env: Env, new_admin: Address) {
         let recovery_address = read_recovery_address(&env);
         recovery_address.require_auth();
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAdmin);
+        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAdmin, SettlementError::InvalidAdmin);
 
         let pending = PendingRecovery {
             new_admin: new_admin.clone(),
@@ -394,7 +431,8 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`InvalidAddress`](SettlementError::InvalidAddress) — if `new_admin` is the zero address.
+    /// * [`EmptyAddress`](SettlementError::EmptyAddress) — if `new_admin` is an empty string.
+    /// * [`ZeroAddress`](SettlementError::ZeroAddress) — if `new_admin` is the zero address.
     /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
     ///
     /// ## Emitted Event: `admin`
@@ -405,14 +443,7 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAddress);
-        let zero_addr: Address = Address::from_string(&soroban_sdk::String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
-        if new_admin == zero_addr {
-            panic_with_error!(&env, SettlementError::InvalidAddress);
-        }
+        validate_nonzero_address(&env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
 
         if new_admin == admin {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
@@ -432,7 +463,10 @@ impl SettlementContract {
         admin.require_auth();
 
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash.clone()),
+            (
+                Symbol::new(&env, "contract_upgraded"),
+                new_wasm_hash.clone(),
+            ),
             admin,
         );
 
@@ -491,7 +525,7 @@ impl SettlementContract {
     pub fn register_merchant(env: Env, merchant: Address) {
         assert_not_paused(&env);
 
-        validate_nonzero_address(&env, &merchant, SettlementError::InvalidAddress);
+        validate_nonzero_address(&env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
 
         let admin = read_admin(&env);
         admin.require_auth();
@@ -660,6 +694,11 @@ impl SettlementContract {
     /// ## Event: `default_rule_updated`
     ///
     /// Emitted when the global default settlement rule is updated.
+    ///
+    /// ## Panics
+    ///
+    /// - Panics with `InvalidSettlementDelay` if `new_rule.settlement_delay_ledger`
+    ///   exceeds `MAX_SETTLEMENT_DELAY_LEDGER`.
     pub fn set_default_rule(env: Env, new_rule: SettlementRule) {
         assert_not_paused(&env);
         let admin = read_admin(&env);
@@ -685,9 +724,11 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .set(&DataKey::DefaultRule, &new_rule);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::DefaultRule, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DefaultRule,
+            RULE_TTL_THRESHOLD,
+            RULE_TTL_BUMP,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "default_rule_updated"),),
@@ -737,11 +778,11 @@ impl SettlementContract {
         amount: i128,
     ) -> FeeSplit {
         assert_not_paused(&env);
-        merchant.require_auth();
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
+        merchant.require_auth();
         if reference == BytesN::from_array(&env, &[0; 32]) {
             panic_with_error!(&env, SettlementError::InvalidPaymentReference);
         }
@@ -776,7 +817,11 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "payment_stored"), merchant.clone(), reference.clone()),
+            (
+                Symbol::new(&env, "payment_stored"),
+                merchant.clone(),
+                reference.clone(),
+            ),
             (),
         );
 
@@ -831,9 +876,11 @@ impl SettlementContract {
         if record.is_some() {
             let ttl = env.storage().persistent().get_ttl(&key);
             if ttl < PAYMENT_TTL_THRESHOLD {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    PAYMENT_TTL_THRESHOLD,
+                    PAYMENT_TTL_BUMP,
+                );
             }
         }
         record
@@ -892,19 +939,22 @@ fn read_pending_recovery(env: &Env) -> PendingRecovery {
 }
 
 fn validate_governance(env: &Env, governance: &Address) {
-    validate_nonzero_address(env, governance, SettlementError::InvalidGovernance);
+    validate_nonzero_address(env, governance, SettlementError::InvalidGovernance, SettlementError::InvalidGovernance);
     let args: Vec<Val> = Vec::new(env);
     let _: Option<FeeConfig> =
         env.invoke_contract(governance, &Symbol::new(env, "get_fee_config"), args);
 }
 
-fn validate_nonzero_address(env: &Env, address: &Address, error: SettlementError) {
+fn validate_nonzero_address(env: &Env, address: &Address, empty_error: SettlementError, zero_error: SettlementError) {
+    if address.to_string().len() == 0 {
+        panic_with_error!(env, empty_error);
+    }
     let zero_address = String::from_str(
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     );
-    if address.to_string().len() == 0 || address.to_string() == zero_address {
-        panic_with_error!(env, error);
+    if address.to_string() == zero_address {
+        panic_with_error!(env, zero_error);
     }
 }
 
