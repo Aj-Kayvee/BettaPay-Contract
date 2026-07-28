@@ -396,7 +396,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
         env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
