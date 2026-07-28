@@ -84,6 +84,20 @@
 //! Full guidance, including worked examples and how to test a migration, is in
 //! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
 //!
+//! ## Pause Model
+//! The pause flag blocks payment-processing and merchant-management
+//! operations (`register_merchant`, `unregister_merchant`,
+//! `set_settlement_rule`, `clear_settlement_rule`, `set_default_rule`,
+//! `store_payment_reference`, `update_governance` all call
+//! `assert_not_paused`). The following administrative operations are
+//! intentionally NOT blocked during pause, so the admin can fix the root
+//! cause of the emergency:
+//!
+//! - `upgrade` — deploy a fix
+//! - `transfer_admin` — rotate compromised keys
+//! - `initiate_recovery` / `cancel_recovery` / `execute_recovery` — the
+//!   admin-recovery flow itself must keep working while paused
+//!
 //! ## Event Convention
 //!
 //! This contract follows a consistent event emission pattern (see Issue #49):
@@ -123,22 +137,31 @@
 
 #![no_std]
 
+use bettapay_common::{
+    constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
+    events::PendingRecovery,
+    storage::{self, CommonDataKey},
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol, Val, Vec,
+    BytesN, Env, Symbol, Val, Vec,
 };
 
-const BPS_DENOMINATOR: u32 = 10_000;
-const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
 const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
 const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
 const RULE_TTL_BUMP: u32 = 17280 * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
 const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
+
+// Settlement-specific TTL policy for short-lived reads of admin / governance /
+// recovery addresses. Deliberately shorter than the protocol defaults so that
+// an inactive instance-side entry can still be evicted in days rather than
+// weeks — see ADR 003 for the rationale.
+const READ_INSTANCE_TTL_THRESHOLD: u32 = 50_000;
+const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 
 // Used until the admin sets a global default settlement rule.
 const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
@@ -235,22 +258,13 @@ pub struct FeeConfig {
     pub network_fee_bps: u32,
 }
 
-#[derive(Clone)]
-#[contracttype]
-pub struct PendingRecovery {
-    pub new_admin: Address,
-    pub execute_after: u64,
-}
-
+// Admin, RecoveryAddress, PendingRecovery, and Paused live in
+// `bettapay_common::storage::CommonDataKey` instead of here - see that
+// type's doc comment for why a shared key type is safe to mix with this
+// contract's own storage without a migration.
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    /// Instance — singleton, read on every mutating call.
-    Admin,
-    /// Instance — singleton address, rarely changes.
-    RecoveryAddress,
-    /// Instance — singleton boolean flag, read on every mutating call.
-    PendingRecovery,
     /// Instance — singleton address, rarely changes.
     Governance,
     /// Persistent — one per merchant, many entries.
@@ -261,8 +275,6 @@ enum DataKey {
     DefaultRule,
     /// Persistent — one per payment, high volume.
     Payment(BytesN<32>),
-    /// Instance — singleton boolean, read on every mutating call.
-    Paused,
 }
 
 #[contracterror]
@@ -285,9 +297,7 @@ pub enum SettlementError {
     /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
     /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
-    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
-    /// in `calculate_fee_split`.
-    InvalidAmount = 7,
+    // Code 7 is intentionally reserved (formerly `InvalidAmount`).
     /// `store_payment_reference` was called with a 32‑byte reference that
     /// already exists in storage.
     DuplicatePaymentReference = 8,
@@ -318,6 +328,18 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100). Raised by
+    /// `store_payment_reference` when `amount < MIN_PAYMENT_AMOUNT`.
+    AmountTooSmall = 22,
+    /// The payment amount is zero. Raised by `calculate_fee_split` when
+    /// `amount == 0`.
+    // 20/21 are taken by EmptyAddress/ZeroAddress above; this and
+    // AmountNegative were originally assigned 20/21 too, which doesn't
+    // compile (duplicate discriminants) - renumbered to the next free codes.
+    AmountZero = 23,
+    /// The payment amount is negative. Raised by `calculate_fee_split` when
+    /// `amount < 0`.
+    AmountNegative = 24,
 }
 
 #[contract]
@@ -331,7 +353,7 @@ impl SettlementContract {
     ///
     /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
     pub fn init(env: Env, admin: Address, governance: Address, recovery_address: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&CommonDataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
         }
         admin.require_auth();
@@ -342,13 +364,13 @@ impl SettlementContract {
             SettlementError::InvalidRecoveryAddress,
             SettlementError::InvalidRecoveryAddress,
         );
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&CommonDataKey::Admin, &admin);
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
         env.storage()
             .instance()
-            .set(&DataKey::RecoveryAddress, &recovery_address);
+            .set(&CommonDataKey::RecoveryAddress, &recovery_address);
     }
 
     /// Return the current admin address.
@@ -398,7 +420,9 @@ impl SettlementContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey::PendingRecovery, &pending);
+            .set(&CommonDataKey::PendingRecovery, &pending);
+        // Settlement re-uses the same `(recovery, new_admin, execute_after)`
+        // payload shape it had before the refactor. The topic name is the same.
         env.events().publish(
             (Symbol::new(&env, "recovery_initiated"),),
             (recovery_address, new_admin, pending.execute_after),
@@ -408,10 +432,16 @@ impl SettlementContract {
     pub fn cancel_recovery(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
             panic_with_error!(&env, SettlementError::RecoveryNotPending);
         }
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events()
             .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
     }
@@ -424,8 +454,14 @@ impl SettlementContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::Admin, &pending.new_admin);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+            .set(&CommonDataKey::Admin, &pending.new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        // Settlement emits just the new admin here, not the structured
+        // `AdminTransferred` payload that governance emits. The two contracts
+        // diverged historically; unifying the payload shape is tracked by
+        // issue #84.
         env.events()
             .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
     }
@@ -457,7 +493,12 @@ impl SettlementContract {
         if new_admin == admin {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
@@ -496,7 +537,7 @@ impl SettlementContract {
     pub fn pause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &true);
+        storage::set_paused(&env, true);
         env.events().publish((symbol_short!("pause"),), true);
     }
 
@@ -514,13 +555,13 @@ impl SettlementContract {
     pub fn unpause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &false);
+        storage::set_paused(&env, false);
         env.events().publish((symbol_short!("unpause"),), false);
     }
 
     /// Returns `true` if the contract is currently paused, `false` otherwise.
     pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
+        storage::is_paused(&env)
     }
 
     /// ## Emitted Event: `merchant_registered`
@@ -776,7 +817,7 @@ impl SettlementContract {
     /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
+    /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
     /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     ///
@@ -804,7 +845,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidPaymentReference);
         }
         if amount < MIN_PAYMENT_AMOUNT {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+            panic_with_error!(&env, SettlementError::AmountTooSmall);
         }
 
         let payment_key = DataKey::Payment(reference.clone());
@@ -873,14 +914,18 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
+    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if amount <= 0 {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+        if amount == 0 {
+            panic_with_error!(&env, SettlementError::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, SettlementError::AmountNegative);
         }
         let rule = read_rule_or_default(&env, merchant);
         calculate_split(&env, amount, &rule)
@@ -924,11 +969,19 @@ impl SettlementContract {
 
 /// Reads the configured admin address and refreshes the instance TTL so it remains available.
 fn read_admin(env: &Env) -> Address {
-    shared::read_admin(env, SettlementError::NotInitialized)
+    env.storage()
+        .instance()
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
 fn read_governance(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Governance)
@@ -936,17 +989,19 @@ fn read_governance(env: &Env) -> Address {
 }
 
 fn read_recovery_address(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
-        .get(&DataKey::RecoveryAddress)
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::RecoveryAddress)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
 fn read_pending_recovery(env: &Env) -> PendingRecovery {
     env.storage()
         .instance()
-        .get(&DataKey::PendingRecovery)
+        .get(&CommonDataKey::PendingRecovery)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::RecoveryNotPending))
 }
 
@@ -971,11 +1026,7 @@ fn validate_nonzero_address(
     if address.to_string().is_empty() {
         panic_with_error!(env, empty_error);
     }
-    let zero_address = String::from_str(
-        env,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
-    if address.to_string() == zero_address {
+    if storage::is_zero_address(env, address) {
         panic_with_error!(env, zero_error);
     }
 }
@@ -1053,14 +1104,11 @@ fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
     }
 }
 
-/// Returns whether the contract is currently paused.
-fn is_paused(env: &Env) -> bool {
-    shared::is_paused(env)
-}
-
 /// Ensures the contract is not paused before mutating state or performing privileged actions.
 fn assert_not_paused(env: &Env) {
-    shared::assert_not_paused(env, SettlementError::Paused);
+    if storage::is_paused(env) {
+        panic_with_error!(env, SettlementError::Paused);
+    }
 }
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.

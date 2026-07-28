@@ -209,9 +209,13 @@ fn store_payment_reference_requires_merchant_auth() {
     client.store_payment_reference(&merchant, &reference, &10_000);
 }
 
-// Issue #84: store_payment_reference rejects zero amount with InvalidAmount (#7)
+// Issue #84: store_payment_reference rejects zero amount. `InvalidAmount`
+// (#7) was later split into AmountZero/AmountNegative/AmountTooSmall, but
+// store_payment_reference's own `amount < MIN_PAYMENT_AMOUNT` guard catches
+// zero/negative amounts as AmountTooSmall (#22) before either of those two
+// more specific errors would ever apply here.
 #[test]
-#[should_panic(expected = "Error(Contract, #7)")]
+#[should_panic(expected = "Error(Contract, #22)")]
 fn store_payment_reference_rejects_zero_amount_with_invalid_amount_error() {
     let (env, client, _admin, merchant) = setup();
     client.register_merchant(&merchant);
@@ -219,9 +223,10 @@ fn store_payment_reference_rejects_zero_amount_with_invalid_amount_error() {
     client.store_payment_reference(&merchant, &reference, &0);
 }
 
-// Issue #84: store_payment_reference rejects negative amounts with InvalidAmount (#7)
+// See store_payment_reference_rejects_zero_amount_with_invalid_amount_error
+// above: caught by the same AmountTooSmall (#22) guard.
 #[test]
-#[should_panic(expected = "Error(Contract, #7)")]
+#[should_panic(expected = "Error(Contract, #22)")]
 fn store_payment_reference_rejects_negative_amount() {
     let (env, client, _admin, merchant) = setup();
     client.register_merchant(&merchant);

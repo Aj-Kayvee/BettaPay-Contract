@@ -50,6 +50,16 @@
 //! internal `assert_not_paused` guard. The contract is re-enabled with
 //! [`GovernanceContract::unpause`], which emits an `unpaused` event.
 //!
+//! ## Pause Model
+//! The pause flag blocks the anchor registry and fee configuration
+//! (`upsert_anchor`, `remove_anchor`, `set_fee_config` all call
+//! `assert_not_paused`). The following administrative operations are
+//! intentionally NOT blocked during pause, so the admin can fix the root
+//! cause of the emergency:
+//! - `upgrade` — deploy a fix
+//! - `transfer_admin` — rotate compromised keys
+//! - `update_system_param` — adjust system configuration
+//!
 //! ### Fee Configuration
 //! [`GovernanceContract::set_fee_config`] stores a [`FeeConfig`] struct that
 //! expresses platform and network fees in basis points (bps, 1 bps = 0.01 %).
@@ -145,29 +155,17 @@
 
 #![no_std]
 
+use bettapay_common::{
+    constants::{
+        MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS, TTL_BUMP_LEDGERS, TTL_THRESHOLD_LEDGERS,
+    },
+    events::{self, AdminTransferred, PendingRecovery},
+    storage::{self, CommonDataKey},
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    String, Symbol, SymbolStr, TryFromVal,
+    Symbol, SymbolStr, TryFromVal,
 };
-
-/// Minimum allowed fee in basis points (0.05%).
-const MIN_FEE_BPS: u32 = 5;
-/// Maximum allowed fee in basis points (50%).
-const MAX_FEE_BPS: u32 = 5_000;
-const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
-const FEE_TTL_BUMP: u32 = 17280 * 30;
-const ANCHOR_TTL_THRESHOLD: u32 = 17280 * 14;
-const ANCHOR_TTL_BUMP: u32 = 17280 * 30;
-const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
-const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
-// Mirrors the private constants of the same name in the `shared` crate;
-// kept here (test-only) so tests can assert on the exact TTL values without
-// `shared` needing to expose them as part of its public API.
-#[cfg(test)]
-const ADMIN_TTL_THRESHOLD: u32 = 17280 * 14;
-#[cfg(test)]
-const ADMIN_TTL_BUMP: u32 = 17280 * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone)]
 #[contracttype]
@@ -176,41 +174,37 @@ pub struct FeeConfig {
     pub network_fee_bps: u32,
 }
 
-/// Structured payload for the `admin_transferred` event, so off-chain
-/// consumers can read `old_admin`/`new_admin` by name instead of having to
-/// know the positional order of an anonymous tuple.
-#[derive(Clone)]
-#[contracttype]
-pub struct AdminTransferred {
-    pub old_admin: Address,
-    pub new_admin: Address,
-}
+// TTL constants are kept locally aliased to `TTL_THRESHOLD_LEDGERS` /
+// `TTL_BUMP_LEDGERS` so existing call sites and tests can keep referring to
+// the named per-key constants.
+const FEE_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+const FEE_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+const ANCHOR_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+const ANCHOR_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+const SYSTEM_PARAM_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+// `read_admin` delegates entirely to `bettapay_common::storage::read_admin`,
+// which uses `TTL_THRESHOLD_LEDGERS`/`TTL_BUMP_LEDGERS` directly, so these
+// aliases are only needed by tests asserting on the exact TTL values.
+#[cfg(test)]
+const ADMIN_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+#[cfg(test)]
+const ADMIN_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
 
-#[derive(Clone)]
-#[contracttype]
-pub struct PendingRecovery {
-    pub new_admin: Address,
-    pub execute_after: u64,
-}
+// Instance-storage TTL policy for short-lived reads of non-`Admin` entries
+// (`RecoveryAddress` here). Deliberately shorter than the 14/30 day policy
+// above because these entries are only consulted during a recovery window,
+// per `adr/003-ttl-value-selection.md`.
+const READ_INSTANCE_TTL_THRESHOLD: u32 = 50_000;
+const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 
+// Admin, RecoveryAddress, PendingRecovery, and Paused live in
+// `bettapay_common::storage::CommonDataKey` instead of here - see that
+// type's doc comment for why a shared key type is safe to mix with this
+// contract's own storage without a migration.
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    /// Storage key for the contract admin address.
-    /// Uses instance storage because access control needs to share the contract's lifetime
-    /// and requires fast, guaranteed access on almost every privileged invocation.
-    Admin,
-
-    /// Storage key for the recovery address that can reset the admin.
-    /// Uses instance storage because it's a core access control mechanism
-    /// that shares the contract's lifetime.
-    RecoveryAddress,
-
-    /// Storage key for the pending recovery operation.
-    /// Uses instance storage because it's temporary access control state
-    /// tied directly to the contract instance.
-    PendingRecovery,
-
     /// Storage key for arbitrary system parameters.
     /// Uses persistent storage because there may be an unbounded number of parameters
     /// that require independent rent management.
@@ -225,11 +219,6 @@ enum DataKey {
     /// Uses persistent storage because the number of supported assets can grow indefinitely,
     /// so each anchor must manage its own rent rather than bloating the instance storage.
     Anchor(Address),
-
-    /// Storage key for the pause state flag.
-    /// Uses instance storage because the pause state dictates whether the contract
-    /// functions at all, needing cheap, guaranteed access just like the Admin key.
-    Paused,
 }
 
 #[contracterror]
@@ -287,19 +276,21 @@ impl GovernanceContract {
     ///
     /// Panics with `GovernanceError::AlreadyInitialized` if already initialised.
     pub fn init(env: Env, admin: Address, recovery_address: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if storage::read_admin(&env).is_some() {
             panic_with_error!(&env, GovernanceError::AlreadyInitialized);
         }
         admin.require_auth();
-        validate_nonzero_address(
+        assert_not_zero(
             &env,
             &recovery_address,
             GovernanceError::InvalidRecoveryAddress,
         );
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&CommonDataKey::Admin, &admin);
         env.storage()
             .instance()
-            .set(&DataKey::RecoveryAddress, &recovery_address);
+            .set(&CommonDataKey::RecoveryAddress, &recovery_address);
+        env.events()
+            .publish((Symbol::new(&env, "initialized"),), admin);
     }
 
     /// Returns whether the contract has been initialised.
@@ -312,7 +303,10 @@ impl GovernanceContract {
     ///
     /// `true` if `init` has been called successfully; `false` otherwise.
     pub fn is_initialized(env: Env) -> bool {
-        env.storage().instance().has(&DataKey::Admin)
+        // `is_initialized` is a cheap probe that should not bump the instance
+        // TTL — going through `storage::read_admin` would do an extend_ttl on
+        // every check and could panic if the contract has no instance entries.
+        env.storage().instance().has(&CommonDataKey::Admin)
     }
 
     /// Returns the current contract administrator address.
@@ -367,7 +361,7 @@ impl GovernanceContract {
     pub fn initiate_recovery(env: Env, new_admin: Address) {
         let recovery_address = read_recovery_address(&env);
         recovery_address.require_auth();
-        validate_nonzero_address(&env, &new_admin, GovernanceError::InvalidAdmin);
+        assert_not_zero(&env, &new_admin, GovernanceError::InvalidAdmin);
 
         let pending = PendingRecovery {
             new_admin: new_admin.clone(),
@@ -375,22 +369,24 @@ impl GovernanceContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey::PendingRecovery, &pending);
-        env.events().publish(
-            (Symbol::new(&env, "recovery_initiated"),),
-            (recovery_address, new_admin, pending.execute_after),
-        );
+            .set(&CommonDataKey::PendingRecovery, &pending);
+        events::emit_recovery_initiated(&env, &recovery_address, &new_admin, pending.execute_after);
     }
 
     pub fn cancel_recovery(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
             panic_with_error!(&env, GovernanceError::RecoveryNotPending);
         }
-        env.storage().instance().remove(&DataKey::PendingRecovery);
-        env.events()
-            .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        events::emit_recovery_cancelled(&env, &admin);
     }
 
     pub fn execute_recovery(env: Env) {
@@ -402,13 +398,15 @@ impl GovernanceContract {
         let old_admin = read_admin(&env);
         env.storage()
             .instance()
-            .set(&DataKey::Admin, &pending.new_admin);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
-        env.events().publish(
-            (Symbol::new(&env, "recovery_executed"),),
-            AdminTransferred {
+            .set(&CommonDataKey::Admin, &pending.new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        events::emit_recovery_executed(
+            &env,
+            &AdminTransferred {
                 old_admin,
-                new_admin: pending.new_admin,
+                new_admin: pending.new_admin.clone(),
             },
         );
     }
@@ -445,13 +443,18 @@ impl GovernanceContract {
         }
         caller.require_auth();
 
-        validate_nonzero_address(&env, &new_admin, GovernanceError::InvalidAdmin);
+        assert_not_zero(&env, &new_admin, GovernanceError::InvalidAdmin);
 
         if admin == new_admin {
             panic_with_error!(&env, GovernanceError::InvalidAdmin);
         }
 
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -477,7 +480,8 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Sets `DataKey::Paused` to `true` in instance storage and emits a `paused` event.
+    /// Writes `true` to instance storage under `CommonDataKey::Paused` and
+    /// emits a `paused` event.
     ///
     /// # Errors
     ///
@@ -489,12 +493,11 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        if is_paused(&env) {
+        if storage::is_paused(&env) {
             panic_with_error!(&env, GovernanceError::AlreadyPaused);
         }
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((Symbol::new(&env, "paused"),), (admin, true));
+        storage::set_paused(&env, true);
+        events::emit_paused(&env, &admin);
     }
 
     /// Resumes normal contract operation after a pause.
@@ -512,7 +515,8 @@ impl GovernanceContract {
     ///
     /// # Effects
     ///
-    /// Sets `DataKey::Paused` to `false` in instance storage and emits an `unpaused` event.
+    /// Sets `CommonDataKey::Paused` to `false` in instance storage and emits
+    /// an `unpaused` event.
     ///
     /// # Errors
     ///
@@ -524,12 +528,11 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        if !is_paused(&env) {
+        if !storage::is_paused(&env) {
             panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
         }
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((Symbol::new(&env, "unpaused"),), (admin, false));
+        storage::set_paused(&env, false);
+        events::emit_unpaused(&env, &admin);
     }
 
     /// Returns whether the contract is currently paused.
@@ -543,7 +546,7 @@ impl GovernanceContract {
     /// `true` if the contract is paused; `false` otherwise (including when the
     /// paused flag has never been explicitly set).
     pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
+        storage::is_paused(&env)
     }
 
     /// Creates or updates a named system parameter in persistent storage.
@@ -840,59 +843,50 @@ impl GovernanceContract {
 
 /// Returns the administrator address stored in contract storage.
 ///
-/// This helper is used internally by authorization checks throughout the
-/// governance contract and refreshes the instance TTL while reading the
-/// current admin value.
+/// Wraps the common `storage::read_admin` helper so the contract can panic
+/// with its own `NotInitialized` error code rather than a generic one.
 ///
 /// # Returns
 ///
-/// The current administrator `Address` stored in persistent instance storage.
+/// The current administrator `Address` stored in instance storage.
 ///
 /// # Panics
 ///
-/// Panics if the contract has not been initialized yet.
+/// Panics with `GovernanceError::NotInitialized` if the contract has not been
+/// initialised yet.
 fn read_admin(env: &Env) -> Address {
-    shared::read_admin(env, GovernanceError::NotInitialized)
+    storage::read_admin(env)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
 }
 
+/// Reads the configured recovery address and refreshes the instance TTL so it
+/// stays available for the recovery flow.
+///
+/// Uses the deliberate 50_000 / 100_000 policy from `adr/003-ttl-value-selection.md`
+/// rather than the standard 14/30 day policy. The standard bump would treat the
+/// recovery address like any other long-lived admin entry, whereas the recovery
+/// address only needs to remain warm during the (rare) recovery window.
 fn read_recovery_address(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
-        .get(&DataKey::RecoveryAddress)
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::RecoveryAddress)
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
 }
 
 fn read_pending_recovery(env: &Env) -> PendingRecovery {
     env.storage()
         .instance()
-        .get(&DataKey::PendingRecovery)
+        .get(&CommonDataKey::PendingRecovery)
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::RecoveryNotPending))
 }
 
-fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError) {
-    let zero_address = String::from_str(
-        env,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
-    if address.to_string().is_empty() || address.to_string() == zero_address {
+fn assert_not_zero(env: &Env, address: &Address, error: GovernanceError) {
+    if address.to_string().is_empty() || storage::is_zero_address(env, address) {
         panic_with_error!(env, error);
     }
-}
-
-fn is_paused(env: &Env) -> bool {
-    shared::is_paused(env)
-}
-
-/// Returns the character length of a `Symbol`.
-///
-/// `Symbol` has no `ToString`/`Display` impl available on the wasm target
-/// (soroban-sdk gates that behind `not(target_family = "wasm")`), so length
-/// is measured via `SymbolStr`, which is available on every target.
-fn symbol_len(env: &Env, key: &Symbol) -> usize {
-    SymbolStr::try_from_val(env, &key.to_symbol_val())
-        .map(|s| s.len())
-        .unwrap_or(0)
 }
 
 /// Ensures the governance contract is not currently paused.
@@ -905,7 +899,20 @@ fn symbol_len(env: &Env, key: &Symbol) -> usize {
 ///
 /// Panics with `GovernanceError::Paused` if the contract is currently paused.
 fn assert_not_paused(env: &Env) {
-    shared::assert_not_paused(env, GovernanceError::Paused);
+    if storage::is_paused(env) {
+        panic_with_error!(env, GovernanceError::Paused);
+    }
+}
+
+/// Returns the character length of a `Symbol`.
+///
+/// `Symbol` has no `ToString`/`Display` impl available on the wasm target
+/// (soroban-sdk gates that behind `not(target_family = "wasm")`), so length
+/// is measured via `SymbolStr`, which is available on every target.
+fn symbol_len(env: &Env, key: &Symbol) -> usize {
+    SymbolStr::try_from_val(env, &key.to_symbol_val())
+        .map(|s| s.len())
+        .unwrap_or(0)
 }
 
 /// Shared test setup used across the main test module and the anchor_*
@@ -936,7 +943,7 @@ mod anchor_removal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+    use soroban_sdk::testutils::storage::{Instance, Persistent as _};
     use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{vec, Bytes, FromVal};
 
@@ -1283,13 +1290,21 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let recovery = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
-        client.init(&admin, &recovery);
-        assert!(client.is_initialized());
-        assert_eq!(client.get_admin(), admin);
+        client.init(&admin, &recovery_address);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "exactly one event emitted on init");
+
+        let (_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "initialized")
+        );
+        assert_eq!(Address::from_val(&env, &data), admin);
     }
 
     // `Symbol`'s 32-character limit is enforced by the Stellar protocol
@@ -1409,14 +1424,11 @@ mod tests {
 
     #[test]
     fn proposes_and_accepts_admin_successfully_in_governance() {
-        let (env, _client, admin) = setup();
+        let (env, client, _admin) = setup();
         let new_admin = Address::generate(&env);
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-        let recovery_address = Address::generate(&env);
 
-        client.init(&admin, &recovery_address);
-        assert_eq!(client.get_recovery_address(), recovery_address);
+        // verify recovery address was stored during init
+        let stored_recovery = client.get_recovery_address();
 
         client.initiate_recovery(&new_admin);
         env.ledger()
@@ -1424,6 +1436,7 @@ mod tests {
         client.execute_recovery();
 
         assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_recovery_address(), stored_recovery);
     }
 
     #[test]
@@ -1541,9 +1554,10 @@ mod tests {
         client.pause(&admin);
         assert!(client.is_paused());
 
-        // Only update_system_param is documented/intentionally exempt from
-        // the pause guard, so it's the only one that should succeed here -
-        // set_fee_config and remove_anchor both call assert_not_paused.
+        // Only update_system_param is exempt from the pause guard in the
+        // actual implementation (set_fee_config/upsert_anchor/remove_anchor
+        // all call assert_not_paused as their first line), so it's the only
+        // one that should succeed here.
         let key = Symbol::new(&env, "max_settle");
         client.update_system_param(&admin, &key, &1440);
         assert_eq!(client.get_system_param(&key), Some(1440));
