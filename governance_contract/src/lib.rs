@@ -543,8 +543,12 @@ impl GovernanceContract {
     ///
     /// # Returns
     ///
-    /// `true` if the contract is paused; `false` otherwise (including when the
-    /// paused flag has never been explicitly set).
+    /// `true` if the contract is paused; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `GovernanceError::NotInitialized` if the contract has not
+    /// been initialized.
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
     }
