@@ -17,3 +17,16 @@ optimize: build
 clean:
 	cargo clean
 	@rm -rf target/optimized
+
+.PHONY: test check clippy all
+
+test:
+	cargo test --workspace
+
+check:
+	cargo check --workspace
+
+clippy:
+	cargo clippy --workspace -- -D warnings
+
+all: fmt check clippy test test_optimized wasm_size
