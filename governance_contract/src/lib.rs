@@ -484,7 +484,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        if is_paused(&env) {
+        if is_paused_internal(&env) {
             panic_with_error!(&env, GovernanceError::AlreadyPaused);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -519,7 +519,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        if !is_paused(&env) {
+        if !is_paused_internal(&env) {
             panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -535,10 +535,17 @@ impl GovernanceContract {
     ///
     /// # Returns
     ///
-    /// `true` if the contract is paused; `false` otherwise (including when the
-    /// paused flag has never been explicitly set).
+    /// `true` if the contract is paused; `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `GovernanceError::NotInitialized` if the contract has not
+    /// been initialized.
     pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(&env, GovernanceError::NotInitialized);
+        }
+        is_paused_internal(&env)
     }
 
     /// Creates or updates a named system parameter in persistent storage.
@@ -879,7 +886,7 @@ fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError
     }
 }
 
-fn is_paused(env: &Env) -> bool {
+fn is_paused_internal(env: &Env) -> bool {
     env.storage()
         .instance()
         .get(&DataKey::Paused)
@@ -896,7 +903,7 @@ fn is_paused(env: &Env) -> bool {
 ///
 /// Panics with `GovernanceError::Paused` if the contract is currently paused.
 fn assert_not_paused(env: &Env) {
-    if is_paused(env) {
+    if is_paused_internal(env) {
         panic_with_error!(env, GovernanceError::Paused);
     }
 }
