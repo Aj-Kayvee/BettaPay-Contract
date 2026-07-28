@@ -2,8 +2,8 @@
 //! `init`, `transfer_admin`, `pause`, `unpause`, `upgrade`, `recovery`.
 
 use crate::*;
-use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
-use soroban_sdk::FromVal;
+use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
+use soroban_sdk::{FromVal, IntoVal};
 
 use super::{register_governance, setup};
 
@@ -186,13 +186,13 @@ fn pause_rejected_for_non_admin() {
 }
 
 #[test]
-fn merchant_registration_succeeds_when_paused() {
+#[should_panic(expected = "Error(Contract, #9)")]
+fn merchant_registration_blocked_when_paused() {
     let (_env, client, _admin, merchant) = setup();
     client.pause();
     assert!(client.is_paused());
-
+    // register_merchant calls assert_not_paused, so this must panic with Paused (#9).
     client.register_merchant(&merchant);
-    assert!(client.is_merchant_registered(&merchant));
 }
 
 #[test]

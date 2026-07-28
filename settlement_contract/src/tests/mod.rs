@@ -10,6 +10,7 @@ pub mod payment_tests;
 pub mod fee_tests;
 
 use crate::*;
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{contract, contractimpl, Env};
 
 /// A minimal governance stub that returns `None` from `get_fee_config`.

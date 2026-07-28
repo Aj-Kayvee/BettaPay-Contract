@@ -3,7 +3,7 @@
 
 use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
-use soroban_sdk::FromVal;
+use soroban_sdk::{FromVal, IntoVal};
 
 use super::{register_governance, setup};
 
@@ -130,7 +130,7 @@ fn unregisters_merchant_and_cleans_up() {
         Symbol::new(&env, "settlement_rule_cleared")
     );
     assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), merchant);
-    let (event_admin, removed): (Address, SettlementRule) = data;
+    let (event_admin, removed): (Address, SettlementRule) = FromVal::from_val(&env, &data);
     assert_eq!(event_admin, admin);
     assert_eq!(removed.platform_fee_bps, rule.platform_fee_bps);
     assert_eq!(removed.network_fee_bps, rule.network_fee_bps);

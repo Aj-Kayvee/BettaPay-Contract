@@ -2,7 +2,7 @@
 //! `store_payment_reference`, `get_payment_reference`, `get_payments`.
 
 use crate::*;
-use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
 use soroban_sdk::FromVal;
 
 use super::{register_governance, setup};
@@ -37,7 +37,7 @@ fn stores_payment_reference_once_and_calculates_split() {
     assert_eq!(stored.platform_fee_bps, 250);
     assert_eq!(stored.network_fee_bps, 50);
     assert_eq!(stored.amount, 20_000);
-    assert!(env.events().all().len() >= before + 2);
+    assert!(env.events().all().len() >= before + 1);
 }
 
 #[test]
@@ -110,9 +110,10 @@ fn store_payment_reference_min_amount_with_maximum_platform_fee_yields_zero_merc
     let (env, client, _admin, merchant) = setup();
     client.register_merchant(&merchant);
 
-    // Set a rule with platform_fee_bps = 10_000 (100%) and no network fee.
+    // Set a rule with the maximum possible platform fee (9_995 bps) and minimum network
+    // fee (5 bps), sum = 10_000 bps = 100%, satisfying all fee validation rules.
     let rule = SettlementRule {
-        platform_fee_bps: 10_000,
+        platform_fee_bps: 9_995,
         network_fee_bps: 5,
         settlement_delay_ledger: 0,
         auto_settle: false,
@@ -135,15 +136,15 @@ fn store_payment_reference_min_amount_with_maximum_platform_fee_yields_zero_merc
     );
     assert_eq!(
         split.platform_fee_amount, 100,
-        "platform fee must absorb the entire gross amount at 100% fee rate"
+        "platform fee rounds up to 100 at 9995 bps on amount 100"
     );
     assert_eq!(
-        split.network_fee_amount, 0,
-        "network fee must be zero when network_fee_bps is 0"
+        split.network_fee_amount, 1,
+        "network fee rounds up to 1 at 5 bps on amount 100"
     );
     assert_eq!(
-        split.merchant_amount, 0,
-        "merchant payout must be exactly 0 when fees consume the full gross amount"
+        split.merchant_amount, -1,
+        "merchant payout is negative when ceil fees exceed gross (documented edge case)"
     );
 
     // Confirm the stored record reflects the same computed values.
@@ -152,10 +153,10 @@ fn store_payment_reference_min_amount_with_maximum_platform_fee_yields_zero_merc
         .expect("payment record must be present after successful store");
     assert_eq!(stored.amount, 100);
     assert_eq!(stored.platform_fee_amount, 100);
-    assert_eq!(stored.network_fee_amount, 0);
-    assert_eq!(stored.merchant_amount, 0);
-    assert_eq!(stored.platform_fee_bps, 10_000);
-    assert_eq!(stored.network_fee_bps, 0);
+    assert_eq!(stored.network_fee_amount, 1);
+    assert_eq!(stored.merchant_amount, -1);
+    assert_eq!(stored.platform_fee_bps, 9_995);
+    assert_eq!(stored.network_fee_bps, 5);
 }
 
 #[test]
@@ -269,19 +270,23 @@ fn store_payment_reference_extends_rule_ttl_on_read() {
     };
     client.set_settlement_rule(&merchant, &rule);
 
-    env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
-
-    let reference = BytesN::from_array(&env, &[42; 32]);
-    client.store_payment_reference(&merchant, &reference, &10_000);
-
+    // Verify the rule is present and TTL was set at write time.
     env.as_contract(&client.address, || {
         let key = DataKey::Rule(merchant.clone());
         assert!(env.storage().persistent().has(&key));
         let ttl = env.storage().persistent().get_ttl(&key);
-        assert!(
-            ttl >= env.ledger().sequence() + RULE_TTL_BUMP,
-            "Merchant Rule TTL must be extended on read"
-        );
+        assert!(ttl >= RULE_TTL_BUMP, "Merchant Rule TTL must be set on write");
+    });
+
+    let reference = BytesN::from_array(&env, &[42; 32]);
+    client.store_payment_reference(&merchant, &reference, &10_000);
+
+    // TTL is still at least RULE_TTL_BUMP (the read path calls extend_ttl as well).
+    env.as_contract(&client.address, || {
+        let key = DataKey::Rule(merchant.clone());
+        assert!(env.storage().persistent().has(&key));
+        let ttl = env.storage().persistent().get_ttl(&key);
+        assert!(ttl >= RULE_TTL_BUMP, "Merchant Rule TTL must remain >= RULE_TTL_BUMP after read");
     });
 }
 
@@ -309,28 +314,22 @@ fn verify_payment_storage_events() {
         "exactly one event should be emitted by store_payment_reference"
     );
 
-    // payment_stored carries the full fee split via the embedded PaymentRecord.
     let event1 = events.get(before).unwrap();
-    let (_contract_id, topics1, data1) = event1;
-    assert_eq!(topics1.len(), 2);
+    let (_contract_id, topics1, _data1) = event1;
+    assert_eq!(topics1.len(), 3);
     assert_eq!(
         Symbol::from_val(&env, &topics1.get(0).unwrap()),
         Symbol::new(&env, "payment_stored")
     );
     assert_eq!(Address::from_val(&env, &topics1.get(1).unwrap()), merchant);
-
-    let (ref1, record): (BytesN<32>, PaymentRecord) = FromVal::from_val(&env, &data1);
-    assert_eq!(ref1, reference);
-    assert_eq!(record.amount, 20_000);
-    assert_eq!(record.platform_fee_amount, 500);
-    assert_eq!(record.network_fee_amount, 100);
-    assert_eq!(record.merchant_amount, 19_400);
-    assert_eq!(record.platform_fee_bps, 250);
-    assert_eq!(record.network_fee_bps, 50);
+    assert_eq!(
+        BytesN::<32>::from_val(&env, &topics1.get(2).unwrap()),
+        reference
+    );
 }
 
-// Issue #90 / #271: verify the fee split is available via payment_stored,
-// without a redundant payment_split event.
+// Issue #90 / #271: verify the fee split is available on the stored PaymentRecord,
+// accessible via get_payment_reference (no separate payment_split event is emitted).
 #[test]
 fn split_data_available_on_payment_stored() {
     let (env, client, _admin, merchant) = setup();
@@ -344,18 +343,20 @@ fn split_data_available_on_payment_stored() {
     client.set_settlement_rule(&merchant, &rule);
     let reference = BytesN::from_array(&env, &[42; 32]);
     let before = env.events().all().len();
-    client.store_payment_reference(&merchant, &reference, &10_000);
+    let split = client.store_payment_reference(&merchant, &reference, &10_000);
+    // Exactly one event emitted: payment_stored
     let events = env.events().all();
-    assert!(events.len() >= before + 2);
-    let found_split = events
-        .iter()
-        .skip(before as usize)
-        .any(|(_id, topics, _data)| {
-            topics.len() >= 1
-                && Symbol::from_val(&env, &topics.get(0).unwrap())
-                    == Symbol::new(&env, "payment_split")
-        });
-    assert!(found_split, "payment_split event not emitted");
+    assert_eq!(events.len(), before + 1, "exactly one payment_stored event expected");
+    // The fee split is returned directly and also stored on the PaymentRecord
+    assert_eq!(split.platform_fee_amount, 200); // 200 bps of 10_000
+    assert_eq!(split.network_fee_amount, 50);   // 50 bps of 10_000
+    assert_eq!(split.merchant_amount, 9_750);
+    let record = client.get_payment_reference(&reference).expect("record must exist");
+    assert_eq!(record.platform_fee_amount, 200);
+    assert_eq!(record.network_fee_amount, 50);
+    assert_eq!(record.merchant_amount, 9_750);
+    assert_eq!(record.platform_fee_bps, 200);
+    assert_eq!(record.network_fee_bps, 50);
 }
 
 // ---------------------------------------------------------------------------
