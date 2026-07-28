@@ -905,7 +905,7 @@ fn assert_not_paused(env: &Env) {
 mod anchor_event_tests;
 
 #[cfg(test)]
-mod anchor_removal_test;
+mod anchor_removal_tests;
 
 #[cfg(test)]
 mod tests {
