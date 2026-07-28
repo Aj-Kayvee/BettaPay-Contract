@@ -126,20 +126,24 @@
 use soroban_sdk::testutils::storage::Persistent;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol, Val, Vec,
+    BytesN, Env, Symbol, Val, Vec,
 };
 
-const BPS_DENOMINATOR: u32 = 10_000;
-const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
 const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
 const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
 const RULE_TTL_BUMP: u32 = 17280 * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
 const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
+
+// Settlement-specific TTL policy for short-lived reads of admin / governance /
+// recovery addresses. Deliberately shorter than the protocol defaults so that
+// an inactive instance-side entry can still be evicted in days rather than
+// weeks — see ADR 003 for the rationale.
+const READ_INSTANCE_TTL_THRESHOLD: u32 = 50_000;
+const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 
 // Used until the admin sets a global default settlement rule.
 const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
@@ -238,13 +242,6 @@ pub struct FeeConfig {
 
 #[derive(Clone)]
 #[contracttype]
-pub struct PendingRecovery {
-    pub new_admin: Address,
-    pub execute_after: u64,
-}
-
-#[derive(Clone)]
-#[contracttype]
 enum DataKey {
     /// Instance — singleton, read on every mutating call.
     Admin,
@@ -339,24 +336,24 @@ impl SettlementContract {
     ///
     /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
     pub fn init(env: Env, admin: Address, governance: Address, recovery_address: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&CommonDataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
         }
         admin.require_auth();
         validate_governance(&env, &governance);
-        validate_nonzero_address(
+        assert_not_zero_address(
             &env,
             &recovery_address,
             SettlementError::InvalidRecoveryAddress,
             SettlementError::InvalidRecoveryAddress,
         );
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&CommonDataKey::Admin, &admin);
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
         env.storage()
             .instance()
-            .set(&DataKey::RecoveryAddress, &recovery_address);
+            .set(&CommonDataKey::RecoveryAddress, &recovery_address);
     }
 
     /// Return the current admin address.
@@ -401,7 +398,9 @@ impl SettlementContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey::PendingRecovery, &pending);
+            .set(&CommonDataKey::PendingRecovery, &pending);
+        // Settlement re-uses the same `(recovery, new_admin, execute_after)`
+        // payload shape it had before the refactor. The topic name is the same.
         env.events().publish(
             (Symbol::new(&env, "recovery_initiated"),),
             (recovery_address, new_admin, pending.execute_after),
@@ -411,10 +410,16 @@ impl SettlementContract {
     pub fn cancel_recovery(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
             panic_with_error!(&env, SettlementError::RecoveryNotPending);
         }
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events()
             .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
     }
@@ -427,8 +432,14 @@ impl SettlementContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::Admin, &pending.new_admin);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+            .set(&CommonDataKey::Admin, &pending.new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        // Settlement emits just the new admin here, not the structured
+        // `AdminTransferred` payload that governance emits. The two contracts
+        // diverged historically; unifying the payload shape is tracked by
+        // issue #84.
         env.events()
             .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
     }
@@ -495,7 +506,7 @@ impl SettlementContract {
     pub fn pause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &true);
+        storage::set_paused(&env, true);
         env.events().publish((symbol_short!("pause"),), true);
     }
 
@@ -513,13 +524,13 @@ impl SettlementContract {
     pub fn unpause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &false);
+        storage::set_paused(&env, false);
         env.events().publish((symbol_short!("unpause"),), false);
     }
 
     /// Returns `true` if the contract is currently paused, `false` otherwise.
     pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
+        storage::is_paused(&env)
     }
 
     /// ## Emitted Event: `merchant_registered`
@@ -920,15 +931,19 @@ impl SettlementContract {
 
 /// Reads the configured admin address and refreshes the instance TTL so it remains available.
 fn read_admin(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::Admin)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
 fn read_governance(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Governance)
@@ -936,17 +951,19 @@ fn read_governance(env: &Env) -> Address {
 }
 
 fn read_recovery_address(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
-        .get(&DataKey::RecoveryAddress)
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::RecoveryAddress)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
 fn read_pending_recovery(env: &Env) -> PendingRecovery {
     env.storage()
         .instance()
-        .get(&DataKey::PendingRecovery)
+        .get(&CommonDataKey::PendingRecovery)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::RecoveryNotPending))
 }
 
@@ -1053,7 +1070,7 @@ fn is_paused(env: &Env) -> bool {
 
 /// Ensures the contract is not paused before mutating state or performing privileged actions.
 fn assert_not_paused(env: &Env) {
-    if is_paused(env) {
+    if storage::is_paused(env) {
         panic_with_error!(env, SettlementError::Paused);
     }
 }
