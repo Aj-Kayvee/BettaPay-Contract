@@ -84,6 +84,16 @@
 //! Full guidance, including worked examples and how to test a migration, is in
 //! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
 //!
+//! ## Pause Model
+//! The pause flag blocks payment-processing and merchant-management operations.
+//! The following administrative operations are intentionally NOT blocked
+//! during pause, so the admin can fix the root cause of the emergency:
+//! - `upgrade` — deploy a fix
+//! - `transfer_admin` — rotate compromised keys
+//! - `update_system_param` — adjust system configuration
+//! - `set_fee_config` — update fee parameters
+//! All other mutating functions check the pause flag via assert_not_paused().
+//!
 //! ## Event Convention
 //!
 //! This contract follows a consistent event emission pattern (see Issue #49):
