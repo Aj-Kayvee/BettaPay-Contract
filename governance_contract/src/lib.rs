@@ -476,6 +476,11 @@ impl GovernanceContract {
     /// The current administrator must authorise the call. The new admin may not be
     /// the zero address or the same address as the current administrator.
     ///
+    /// This operation is intentionally exempt from the pause check. In an emergency,
+    /// a paused contract may still need an administrator recovery path to rotate to
+    /// a new key or recover from a compromised admin. The pause remains effective
+    /// for other mutating operations.
+    ///
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
