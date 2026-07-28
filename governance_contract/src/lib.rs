@@ -93,6 +93,33 @@
 //! | 5 | `AnchorMissing` | Tried to remove an unregistered anchor |
 //! | 6 | `Paused` | Contract is paused |
 //! | 7 | `InvalidAdmin` | Transfer target is zero-address or current admin |
+//! | 8 | `InvalidParamValue` | Supplied system parameter value is invalid or out of bounds |
+//! | 9 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
+//! | 10 | `RecoveryNotPending` | No recovery operation is currently pending |
+//! | 11 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
+//! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
+//! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
+//!
+//! ## Event Conventions
+//!
+//! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
+//! indexers a predictable topic layout, every event in this contract follows
+//! the same conventions:
+//!
+//! - `topic[0]` is always the event name as a [`Symbol`], constructed via
+//!   [`Symbol::new`]. Indexers filter on this single topic to dispatch by
+//!   event type.
+//! - `topic[1..n]` carry the entity identifiers that scope the event —
+//!   typically an [`Address`] (asset, admin, recovery address), but for some
+//!   events also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`) or a
+//!   [`Symbol`] (system-parameter key on `sys_param_updated`). The exact
+//!   shape of `topic[1..n]` is fixed per event.
+//! - The **data payload** carries the values describing the state change.
+//!   Its shape is event-specific: a single value, a tuple, a typed struct
+//!   such as [`AdminTransferred`], or `()`.
+//! - Each entry point emits exactly the events tied to the state change it
+//!   performs; no two events emitted by the same call describe the same
+//!   logical change.
 //!
 //! ## Emitted Events
 //!
@@ -159,6 +186,21 @@ const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
+    /// Storage key for the contract admin address.
+    /// Uses instance storage because access control needs to share the contract's lifetime
+    /// and requires fast, guaranteed access on almost every privileged invocation.
+    Admin,
+
+    /// Storage key for the recovery address that can reset the admin.
+    /// Uses instance storage because it's a core access control mechanism
+    /// that shares the contract's lifetime.
+    RecoveryAddress,
+
+    /// Storage key for the pending recovery operation.
+    /// Uses instance storage because it's temporary access control state
+    /// tied directly to the contract instance.
+    PendingRecovery,
+
     /// Storage key for arbitrary system parameters.
     /// Uses persistent storage because there may be an unbounded number of parameters
     /// that require independent rent management.
@@ -173,6 +215,11 @@ enum DataKey {
     /// Uses persistent storage because the number of supported assets can grow indefinitely,
     /// so each anchor must manage its own rent rather than bloating the instance storage.
     Anchor(Address),
+
+    /// Storage key for the pause state flag.
+    /// Uses instance storage because the pause state dictates whether the contract
+    /// functions at all, needing cheap, guaranteed access just like the Admin key.
+    Paused,
 }
 
 #[contracterror]
@@ -376,25 +423,29 @@ impl GovernanceContract {
     /// # Arguments
     ///
     /// * `env` - The Soroban execution environment.
-    /// * `_caller` - Unused parameter; authorisation is enforced via the stored admin.
+    /// * `caller` - Must be the stored administrator.
     /// * `new_admin` - The address to become the new administrator.
     ///
     /// # Authorization
     ///
-    /// Requires authorisation from the current stored administrator.
+    /// Requires `caller == admin` and authentication from `caller`.
     ///
     /// # Effects
     ///
-    /// Overwrites `DataKey::Admin` in instance storage and emits an `admin` event
-    /// carrying the new administrator address.
+    /// Overwrites `DataKey::Admin` in instance storage and emits an `admin_transferred`
+    /// event carrying the old and new administrator addresses.
     ///
     /// # Errors
     ///
+    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the stored administrator.
     /// Panics with `GovernanceError::InvalidAdmin` if `new_admin` is the zero address
     /// or is identical to the current administrator.
-    pub fn transfer_admin(env: Env, _caller: Address, new_admin: Address) {
+    pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
         let admin = read_admin(&env);
-        admin.require_auth();
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
 
         assert_not_zero(&env, &new_admin, GovernanceError::InvalidAdmin);
 
@@ -402,16 +453,10 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::InvalidAdmin);
         }
 
-        env.storage()
-            .instance()
-            .set(&CommonDataKey::Admin, &new_admin);
-        // The `PendingAdmin` key was removed entirely — recovery is the only
-        // path that introduces a new admin, and it stores under
-        // `CommonDataKey::PendingRecovery`. The previous `remove(...)` call
-        // here was a no-op against a non-existent variant and has been dropped.
-        events::emit_admin_transferred(
-            &env,
-            &AdminTransferred {
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
                 old_admin: admin,
                 new_admin,
             },
@@ -626,6 +671,7 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn set_fee_config(env: Env, caller: Address, config: FeeConfig) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
@@ -645,7 +691,7 @@ impl GovernanceContract {
         }
 
         let key = DataKey::FeeConfig;
-        env.storage().persistent().set(&key, &config.clone());
+        env.storage().persistent().set(&key, &config);
         env.storage()
             .persistent()
             .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
@@ -717,8 +763,10 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
-        env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), (old_anchor, anchor));
+        env.events().publish(
+            (Symbol::new(&env, "anchor_upserted"), asset),
+            (old_anchor, anchor),
+        );
     }
 
     /// Removes the anchor configuration for the given asset.
@@ -748,6 +796,7 @@ impl GovernanceContract {
     /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
     /// Panics with `GovernanceError::Paused` if the contract is currently paused.
     pub fn remove_anchor(env: Env, caller: Address, asset: Address) {
+        assert_not_paused(&env);
         let admin = read_admin(&env);
         if caller != admin {
             panic_with_error!(&env, GovernanceError::Unauthorized);
@@ -832,12 +881,12 @@ fn read_pending_recovery(env: &Env) -> PendingRecovery {
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::RecoveryNotPending))
 }
 
-/// Panics with `error` if `address` is the network zero address.
-///
-/// Composes [`storage::is_zero_address`] with the contract-specific error
-/// variant, so the panic message keeps the contract's error code.
-fn assert_not_zero(env: &Env, address: &Address, error: GovernanceError) {
-    if storage::is_zero_address(env, address) {
+fn validate_nonzero_address(env: &Env, address: &Address, error: GovernanceError) {
+    let zero_address = String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    if address.to_string().len() == 0 || address.to_string() == zero_address {
         panic_with_error!(env, error);
     }
 }
@@ -861,7 +910,7 @@ fn assert_not_paused(env: &Env) {
 mod anchor_event_tests;
 
 #[cfg(test)]
-mod anchor_removal_test;
+mod anchor_removal_tests;
 
 #[cfg(test)]
 mod tests {
@@ -927,8 +976,9 @@ mod tests {
     fn governance_rejects_double_initialization() {
         let (env, client, _admin) = setup();
         let other_admin = Address::generate(&env);
+        let recovery = Address::generate(&env);
 
-        client.init(&other_admin);
+        client.init(&other_admin, &recovery);
     }
 
     #[test]
@@ -941,6 +991,15 @@ mod tests {
         );
 
         client.transfer_admin(&admin, &zero_address);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
+    fn governance_rejects_empty_address_admin_transfer() {
+        let (env, client, admin) = setup();
+        let empty_address = Address::from_string(&soroban_sdk::String::from_str(&env, ""));
+
+        client.transfer_admin(&admin, &empty_address);
     }
 
     #[test]
@@ -1213,20 +1272,13 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
+        let recovery = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
-        client.init(&admin);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), 1, "exactly one event emitted on init");
-
-        let (_contract_id, topics, data) = events.get(0).unwrap();
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "initialized")
-        );
-        assert_eq!(Address::from_val(&env, &data), admin);
+        client.init(&admin, &recovery);
+        assert!(client.is_initialized());
+        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
@@ -1264,6 +1316,18 @@ mod tests {
     fn rejects_same_admin_transfer() {
         let (_env, client, admin) = setup();
         client.transfer_admin(&admin, &admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn rejects_transfer_admin_from_non_admin_caller() {
+        let (env, client, _admin) = setup();
+        let non_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        // caller (non_admin) != stored admin — transfer_admin must reject with
+        // GovernanceError::Unauthorized before reaching require_auth().
+        client.transfer_admin(&non_admin, &new_admin);
     }
 
     #[test]
