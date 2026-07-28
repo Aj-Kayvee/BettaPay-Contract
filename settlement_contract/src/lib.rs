@@ -31,6 +31,29 @@
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
 //!
+//! ## Event Conventions
+//!
+//! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
+//! indexers a predictable topic layout, every event in this contract follows
+//! the same conventions:
+//!
+//! - `topic[0]` is always the event name as a [`Symbol`], constructed via
+//!   [`Symbol::new`] (or [`symbol_short!`] when the name fits in nine bytes).
+//!   Indexers filter on this single topic to dispatch by event type.
+//! - `topic[1..n]` carry the entity identifiers that scope the event —
+//!   typically an [`Address`] (merchant, asset, admin), but for some events
+//!   also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`, payment
+//!   reference on `payment_stored`). The exact shape of `topic[1..n]` is
+//!   fixed per event.
+//! - The **data payload** carries the values describing the state change.
+//!   Its shape is event-specific: a single value (`true` for `pause`,
+//!   `admin` for `merchant_registered`), a tuple (e.g.
+//!   `(admin, prev, rule)` for `settlement_rule_updated`), a typed struct
+//!   such as the `SettlementRule` emitted on `bootstrap_fallback`, or `()`.
+//! - Each entry point emits exactly the events tied to the state change it
+//!   performs; no two events emitted by the same call describe the same
+//!   logical change.
+//!
 //! ## Upgrade Process
 //!
 //! [`SettlementContract::upgrade`] replaces the Wasm and nothing else. That is

@@ -100,6 +100,27 @@
 //! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
 //! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
 //!
+//! ## Event Conventions
+//!
+//! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
+//! indexers a predictable topic layout, every event in this contract follows
+//! the same conventions:
+//!
+//! - `topic[0]` is always the event name as a [`Symbol`], constructed via
+//!   [`Symbol::new`]. Indexers filter on this single topic to dispatch by
+//!   event type.
+//! - `topic[1..n]` carry the entity identifiers that scope the event —
+//!   typically an [`Address`] (asset, admin, recovery address), but for some
+//!   events also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`) or a
+//!   [`Symbol`] (system-parameter key on `sys_param_updated`). The exact
+//!   shape of `topic[1..n]` is fixed per event.
+//! - The **data payload** carries the values describing the state change.
+//!   Its shape is event-specific: a single value, a tuple, a typed struct
+//!   such as [`AdminTransferred`], or `()`.
+//! - Each entry point emits exactly the events tied to the state change it
+//!   performs; no two events emitted by the same call describe the same
+//!   logical change.
+//!
 //! ## Emitted Events
 //!
 //! | Event symbol | Trigger |
