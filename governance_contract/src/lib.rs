@@ -93,6 +93,12 @@
 //! | 5 | `AnchorMissing` | Tried to remove an unregistered anchor |
 //! | 6 | `Paused` | Contract is paused |
 //! | 7 | `InvalidAdmin` | Transfer target is zero-address or current admin |
+//! | 8 | `InvalidParamValue` | Supplied system parameter value is invalid or out of bounds |
+//! | 9 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
+//! | 10 | `RecoveryNotPending` | No recovery operation is currently pending |
+//! | 11 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
+//! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
+//! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
 //!
 //! ## Emitted Events
 //!
