@@ -286,9 +286,7 @@ pub enum SettlementError {
     /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
     /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
-    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
-    /// in `calculate_fee_split`.
-    InvalidAmount = 7,
+    // Code 7 is intentionally reserved (formerly `InvalidAmount`).
     /// `store_payment_reference` was called with a 32‑byte reference that
     /// already exists in storage.
     DuplicatePaymentReference = 8,
@@ -319,6 +317,15 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// The payment amount is zero. Raised by `calculate_fee_split` when
+    /// `amount == 0`.
+    AmountZero = 20,
+    /// The payment amount is negative. Raised by `calculate_fee_split` when
+    /// `amount < 0`.
+    AmountNegative = 21,
+    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100). Raised by
+    /// `store_payment_reference` when `amount < MIN_PAYMENT_AMOUNT`.
+    AmountTooSmall = 22,
 }
 
 #[contract]
@@ -449,6 +456,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
@@ -759,7 +767,7 @@ impl SettlementContract {
     /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
+    /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
     /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     ///
@@ -787,7 +795,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::InvalidPaymentReference);
         }
         if amount < MIN_PAYMENT_AMOUNT {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+            panic_with_error!(&env, SettlementError::AmountTooSmall);
         }
 
         let payment_key = DataKey::Payment(reference.clone());
@@ -856,14 +864,18 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
+    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if amount <= 0 {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+        if amount == 0 {
+            panic_with_error!(&env, SettlementError::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, SettlementError::AmountNegative);
         }
         let rule = read_rule_or_default(&env, merchant);
         calculate_split(&env, amount, &rule)

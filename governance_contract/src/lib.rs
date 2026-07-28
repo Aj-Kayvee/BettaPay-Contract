@@ -145,6 +145,8 @@
 
 #![no_std]
 
+use soroban_sdk::testutils::storage::Persistent;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
     String, Symbol,
@@ -447,6 +449,7 @@ impl GovernanceContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -754,6 +757,7 @@ impl GovernanceContract {
         }
         caller.require_auth();
         let key = DataKey::Anchor(asset.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events().publish(
@@ -910,6 +914,7 @@ mod anchor_removal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::storage::Instance;
     use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{vec, Bytes, FromVal};
 
@@ -1267,13 +1272,21 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let recovery = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
-        client.init(&admin, &recovery);
-        assert!(client.is_initialized());
-        assert_eq!(client.get_admin(), admin);
+        client.init(&admin, &recovery_address);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "exactly one event emitted on init");
+
+        let (_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "initialized")
+        );
+        assert_eq!(Address::from_val(&env, &data), admin);
     }
 
     #[test]
@@ -1384,13 +1397,11 @@ mod tests {
 
     #[test]
     fn proposes_and_accepts_admin_successfully_in_governance() {
-        let (env, client, admin) = setup();
+        let (env, client, _admin) = setup();
         let new_admin = Address::generate(&env);
-        let contract_id = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
 
-        client.init(&admin, &recovery_address);
-        assert_eq!(client.get_recovery_address(), recovery_address);
+        // verify recovery address was stored during init
+        let stored_recovery = client.get_recovery_address();
 
         client.initiate_recovery(&new_admin);
         env.ledger()
@@ -1398,6 +1409,7 @@ mod tests {
         client.execute_recovery();
 
         assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_recovery_address(), stored_recovery);
     }
 
     #[test]
