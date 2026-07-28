@@ -31,6 +31,29 @@
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
 //!
+//! ## Event Conventions
+//!
+//! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
+//! indexers a predictable topic layout, every event in this contract follows
+//! the same conventions:
+//!
+//! - `topic[0]` is always the event name as a [`Symbol`], constructed via
+//!   [`Symbol::new`] (or [`symbol_short!`] when the name fits in nine bytes).
+//!   Indexers filter on this single topic to dispatch by event type.
+//! - `topic[1..n]` carry the entity identifiers that scope the event —
+//!   typically an [`Address`] (merchant, asset, admin), but for some events
+//!   also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`, payment
+//!   reference on `payment_stored`). The exact shape of `topic[1..n]` is
+//!   fixed per event.
+//! - The **data payload** carries the values describing the state change.
+//!   Its shape is event-specific: a single value (`true` for `pause`,
+//!   `admin` for `merchant_registered`), a tuple (e.g.
+//!   `(admin, prev, rule)` for `settlement_rule_updated`), a typed struct
+//!   such as the `SettlementRule` emitted on `bootstrap_fallback`, or `()`.
+//! - Each entry point emits exactly the events tied to the state change it
+//!   performs; no two events emitted by the same call describe the same
+//!   logical change.
+//!
 //! ## Upgrade Process
 //!
 //! [`SettlementContract::upgrade`] replaces the Wasm and nothing else. That is
@@ -60,6 +83,48 @@
 //!
 //! Full guidance, including worked examples and how to test a migration, is in
 //! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
+//!
+//! ## Pause Model
+//! The pause flag blocks payment-processing and merchant-management
+//! operations (`register_merchant`, `unregister_merchant`,
+//! `set_settlement_rule`, `clear_settlement_rule`, `set_default_rule`,
+//! `store_payment_reference`, `update_governance` all call
+//! `assert_not_paused`). The following administrative operations are
+//! intentionally NOT blocked during pause, so the admin can fix the root
+//! cause of the emergency:
+//!
+//! - `upgrade` — deploy a fix
+//! - `transfer_admin` — rotate compromised keys
+//! - `initiate_recovery` / `cancel_recovery` / `execute_recovery` — the
+//!   admin-recovery flow itself must keep working while paused
+//!
+//! ## Event Convention
+//!
+//! This contract follows a consistent event emission pattern (see Issue #49):
+//!
+//! **Topics** carry the fixed event-name symbol and filterable entity
+//! identifiers. The first topic is always a [`Symbol`] naming the event type,
+//! enabling indexers to filter by event kind. Subsequent topics hold the
+//! primary identifiers relevant to the event (e.g., merchant address, payment
+//! reference), so listeners can subscribe to events for a specific entity
+//! without scanning all events.
+//!
+//! **Data** carries caller context and event-specific details — information
+//! that is useful once the event has been matched by topic but is not needed
+//! for filtering. Typically this includes the caller's address (admin) and
+//! any before/after values or configuration data.
+//!
+//! ### Canonical Example
+//!
+//! [`SettlementContract::register_merchant`] is the canonical example of this convention:
+//!
+//! | Role   | Value                                                       |
+//! |--------|-------------------------------------------------------------|
+//! | Topics | `(Symbol("merchant_registered"), Address merchant)`         |
+//! | Data   | `Address caller` (the admin who authorized the registration)|
+//!
+//! New events should follow the same pattern: filterable identifiers in
+//! topics, caller context and details in data.
 
 // TODO: Refactor flat file structure into modular hierarchy (Issue #84)
 // Intended module structure:
@@ -72,23 +137,43 @@
 
 #![no_std]
 
+use bettapay_common::{
+    constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
+    events::PendingRecovery,
+    storage::{self, CommonDataKey},
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol, Val, Vec,
+    BytesN, Env, Symbol, Val, Vec,
 };
-use soroban_sdk::testutils::storage::Persistent;
 
-const BPS_DENOMINATOR: u32 = 10_000;
-const MIN_FEE_BPS: u32 = 5; // Must match governance_contract::MIN_FEE_BPS
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
+/// Approximate ledgers per day on Stellar (~5s per ledger).
+const LEDGERS_PER_DAY: u32 = 17280;
+
+// TTL thresholds and bumps use LEDGERS_PER_DAY for readability.
+const PAYMENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;  // 14 days
+const PAYMENT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;       // 30 days
+const RULE_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
+const RULE_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
+const MERCHANT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
+const MERCHANT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
+const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
 const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
 const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
 const RULE_TTL_BUMP: u32 = 17280 * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
 const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
+const DEFAULT_TIMELOCK_DELAY_SECONDS: u64 = 2 * 24 * 60 * 60; // 48 hours
+
+// Settlement-specific TTL policy for short-lived reads of admin / governance /
+// recovery addresses. Deliberately shorter than the protocol defaults so that
+// an inactive instance-side entry can still be evicted in days rather than
+// weeks — see ADR 003 for the rationale.
+const READ_INSTANCE_TTL_THRESHOLD: u32 = 50_000;
+const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 
 // Used until the admin sets a global default settlement rule.
 const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
@@ -132,8 +217,8 @@ pub struct SettlementRule {
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeSplit {
-    /// The total gross amount of the payment before any fees are deducted.
-    /// Mirrors the input amount for caller convenience — not independently meaningful.
+    /// The total gross amount of the payment.
+    /// Mirrors the `amount` parameter passed to `store_payment_reference`.
     pub gross_amount: i128,
     /// Portion of the settlement fee allocated to the platform.
     /// This amount is calculated by applying the platform fee basis points to the gross amount.
@@ -185,25 +270,55 @@ pub struct FeeConfig {
     pub network_fee_bps: u32,
 }
 
+// Admin, RecoveryAddress, PendingRecovery, and Paused live in
+// `bettapay_common::storage::CommonDataKey` instead of here - see that
+// type's doc comment for why a shared key type is safe to mix with this
+// contract's own storage without a migration.
 #[derive(Clone)]
 #[contracttype]
-pub struct PendingRecovery {
-    pub new_admin: Address,
-    pub execute_after: u64,
+pub enum Operation {
+    UpdateGovernance(Address),
+    CancelRecovery,
+    TransferAdmin(Address),
+    Upgrade(BytesN<32>),
+    RegisterMerchant(Address),
+    UnregisterMerchant(Address),
+    SetSettlementRule(Address, SettlementRule),
+    ClearSettlementRule(Address),
+    SetDefaultRule(SettlementRule),
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub enum Operation {
+    UpdateGovernance(Address),
+    CancelRecovery,
+    TransferAdmin(Address),
+    Upgrade(BytesN<32>),
+    RegisterMerchant(Address),
+    UnregisterMerchant(Address),
+    SetSettlementRule(Address, SettlementRule),
+    ClearSettlementRule(Address),
+    SetDefaultRule(SettlementRule),
 }
 
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    Admin,
-    RecoveryAddress,
-    PendingRecovery,
+    /// Instance — singleton address, rarely changes.
     Governance,
+    /// Persistent — one per merchant, many entries.
     Merchant(Address),
+    /// Persistent — one per merchant, may expire.
     Rule(Address),
+    /// Persistent — single value but may be updated.
     DefaultRule,
+    /// Persistent — one per payment, high volume.
     Payment(BytesN<32>),
+    /// Instance — singleton boolean, read on every mutating call.
     Paused,
+    /// Storage key for a scheduled operation.
+    ScheduledOperation(BytesN<32>),
 }
 
 #[contracterror]
@@ -223,11 +338,10 @@ pub enum SettlementError {
     /// and `unregister_merchant` when the merchant is missing.
     MerchantMissing = 5,
     /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
-    /// exceeds 10 000. Raised by `set_settlement_rule` and `set_default_rule`.
+    /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
+    /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
-    /// The payment amount is below `MIN_PAYMENT_AMOUNT` (100) or is ≤ 0
-    /// in `calculate_fee_split`.
-    InvalidAmount = 7,
+    // Code 7 is intentionally reserved (formerly `InvalidAmount`).
     /// `store_payment_reference` was called with a 32‑byte reference that
     /// already exists in storage.
     DuplicatePaymentReference = 8,
@@ -235,9 +349,12 @@ pub enum SettlementError {
     Paused = 9,
     /// No merchant-specific rule has been set. The merchant will use the default rule or bootstrap fallback.
     MerchantRuleNotSet = 10,
-    /// The supplied address is the zero‑address or an empty string.
+    /// The supplied address is an empty string.
     /// Raised by `register_merchant` and `transfer_admin`.
-    InvalidAddress = 11,
+    EmptyAddress = 20,
+    /// The supplied address is the zero‑address.
+    /// Raised by `register_merchant` and `transfer_admin`.
+    ZeroAddress = 21,
     /// `store_payment_reference` was called with an all‑zero 32‑byte
     /// reference, which is reserved.
     InvalidPaymentReference = 12,
@@ -255,6 +372,12 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// The scheduled operation is not yet ready for execution.
+    ExecutionNotReady = 22,
+    /// The operation has not been scheduled.
+    OperationNotScheduled = 23,
+    /// The operation has already been scheduled.
+    OperationAlreadyScheduled = 24,
 }
 
 #[contract]
@@ -268,7 +391,7 @@ impl SettlementContract {
     ///
     /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
     pub fn init(env: Env, admin: Address, governance: Address, recovery_address: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&CommonDataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
         }
         admin.require_auth();
@@ -277,14 +400,15 @@ impl SettlementContract {
             &env,
             &recovery_address,
             SettlementError::InvalidRecoveryAddress,
+            SettlementError::InvalidRecoveryAddress,
         );
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&CommonDataKey::Admin, &admin);
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
         env.storage()
             .instance()
-            .set(&DataKey::RecoveryAddress, &recovery_address);
+            .set(&CommonDataKey::RecoveryAddress, &recovery_address);
     }
 
     /// Return the current admin address.
@@ -321,7 +445,12 @@ impl SettlementContract {
     pub fn initiate_recovery(env: Env, new_admin: Address) {
         let recovery_address = read_recovery_address(&env);
         recovery_address.require_auth();
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAdmin);
+        validate_nonzero_address(
+            &env,
+            &new_admin,
+            SettlementError::InvalidAdmin,
+            SettlementError::InvalidAdmin,
+        );
 
         let pending = PendingRecovery {
             new_admin: new_admin.clone(),
@@ -329,7 +458,9 @@ impl SettlementContract {
         };
         env.storage()
             .instance()
-            .set(&DataKey::PendingRecovery, &pending);
+            .set(&CommonDataKey::PendingRecovery, &pending);
+        // Settlement re-uses the same `(recovery, new_admin, execute_after)`
+        // payload shape it had before the refactor. The topic name is the same.
         env.events().publish(
             (Symbol::new(&env, "recovery_initiated"),),
             (recovery_address, new_admin, pending.execute_after),
@@ -339,10 +470,16 @@ impl SettlementContract {
     pub fn cancel_recovery(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
-        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
             panic_with_error!(&env, SettlementError::RecoveryNotPending);
         }
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events()
             .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
     }
@@ -355,8 +492,14 @@ impl SettlementContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::Admin, &pending.new_admin);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+            .set(&CommonDataKey::Admin, &pending.new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        // Settlement emits just the new admin here, not the structured
+        // `AdminTransferred` payload that governance emits. The two contracts
+        // diverged historically; unifying the payload shape is tracked by
+        // issue #84.
         env.events()
             .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
     }
@@ -366,7 +509,8 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-    /// * [`InvalidAddress`](SettlementError::InvalidAddress) — if `new_admin` is the zero address.
+    /// * [`EmptyAddress`](SettlementError::EmptyAddress) — if `new_admin` is an empty string.
+    /// * [`ZeroAddress`](SettlementError::ZeroAddress) — if `new_admin` is the zero address.
     /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
     ///
     /// ## Emitted Event: `admin`
@@ -377,20 +521,22 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
-        validate_nonzero_address(&env, &new_admin, SettlementError::InvalidAddress);
-        let zero_addr: Address = Address::from_string(&soroban_sdk::String::from_str(
+        validate_nonzero_address(
             &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
-        if new_admin == zero_addr {
-            panic_with_error!(&env, SettlementError::InvalidAddress);
-        }
+            &new_admin,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
 
         if new_admin == admin {
             panic_with_error!(&env, SettlementError::InvalidAdmin);
         }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events().publish((symbol_short!("admin"),), new_admin);
     }
 
@@ -404,8 +550,9 @@ impl SettlementContract {
         let admin = read_admin(&env);
         admin.require_auth();
 
+        let event_wasm_hash = new_wasm_hash.clone();
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash.clone()),
+            (Symbol::new(&env, "contract_upgraded"), event_wasm_hash),
             admin,
         );
 
@@ -423,13 +570,17 @@ impl SettlementContract {
     ///
     /// **Topics**: `(Symbol("pause"),)`
     /// **Data**: `bool true`
+    /// **Data**: `(Address caller, bool is_paused)`
     pub fn pause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
+        // Bypasses timelock for emergencies
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((symbol_short!("pause"),), true);
+        env.events()
+            .publish((symbol_short!("pause"),), (admin, true));
     }
 
+    
     /// Unpause the contract, re-enabling paused operations.
     ///
     /// # Panics
@@ -441,16 +592,20 @@ impl SettlementContract {
     ///
     /// **Topics**: `(Symbol("unpause"),)`
     /// **Data**: `bool false`
+    /// **Data**: `(Address caller, bool is_paused)`
     pub fn unpause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
+        // Bypasses timelock for emergencies
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((symbol_short!("unpause"),), false);
+        env.events()
+            .publish((symbol_short!("unpause"),), (admin, false));
     }
 
+    
     /// Returns `true` if the contract is currently paused, `false` otherwise.
     pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
+        storage::is_paused(&env)
     }
 
     /// ## Emitted Event: `merchant_registered`
@@ -464,7 +619,12 @@ impl SettlementContract {
     pub fn register_merchant(env: Env, merchant: Address) {
         assert_not_paused(&env);
 
-        validate_nonzero_address(&env, &merchant, SettlementError::InvalidAddress);
+        validate_nonzero_address(
+            &env,
+            &merchant,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
 
         let admin = read_admin(&env);
         admin.require_auth();
@@ -484,16 +644,26 @@ impl SettlementContract {
 
     /// Remove a merchant from the registry and clear any associated settlement rule.
     ///
-    /// Note: If a settlement rule exists for this merchant, it is silently
-    /// removed without emitting a `settlement_rule_cleared` event.
-    ///
     /// # Panics
     ///
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     ///
-    /// ## Emitted Event: `merchant_unregistered`
+    /// ## Emitted Events
+    ///
+    /// If the merchant has a settlement rule set, a `settlement_rule_cleared`
+    /// event is emitted before the `merchant_unregistered` event.
+    ///
+    /// ### `settlement_rule_cleared` (conditional)
+    ///
+    /// **Topics**: `(Symbol("settlement_rule_cleared"), Address merchant)`
+    ///
+    /// **Data**: `(Address caller, SettlementRule removed)`
+    /// - `caller`: the admin who authorized the unregistration
+    /// - `removed`: the settlement rule that was removed
+    ///
+    /// ### `merchant_unregistered`
     ///
     /// **Topics**: `(Symbol("merchant_unregistered"), Address merchant)`
     /// - First topic: fixed event-name symbol for filtering by event type
@@ -514,8 +684,16 @@ impl SettlementContract {
         env.storage().persistent().remove(&key);
 
         let rule_key = DataKey::Rule(merchant.clone());
-        if env.storage().persistent().has(&rule_key) {
+        let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
+        if let Some(old_rule) = old_rule {
             env.storage().persistent().remove(&rule_key);
+            env.events().publish(
+                (
+                    Symbol::new(&env, "settlement_rule_cleared"),
+                    merchant.clone(),
+                ),
+                (admin.clone(), old_rule),
+            );
         }
 
         env.events().publish(
@@ -618,6 +796,11 @@ impl SettlementContract {
     /// ## Event: `default_rule_updated`
     ///
     /// Emitted when the global default settlement rule is updated.
+    ///
+    /// ## Panics
+    ///
+    /// - Panics with `InvalidSettlementDelay` if `new_rule.settlement_delay_ledger`
+    ///   exceeds `MAX_SETTLEMENT_DELAY_LEDGER`.
     pub fn set_default_rule(env: Env, new_rule: SettlementRule) {
         assert_not_paused(&env);
         let admin = read_admin(&env);
@@ -643,9 +826,11 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .set(&DataKey::DefaultRule, &new_rule);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::DefaultRule, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DefaultRule,
+            RULE_TTL_THRESHOLD,
+            RULE_TTL_BUMP,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "default_rule_updated"),),
@@ -676,7 +861,7 @@ impl SettlementContract {
     /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is below the minimum.
+    /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
     /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     ///
@@ -695,16 +880,16 @@ impl SettlementContract {
         amount: i128,
     ) -> FeeSplit {
         assert_not_paused(&env);
-        merchant.require_auth();
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
+        merchant.require_auth();
         if reference == BytesN::from_array(&env, &[0; 32]) {
             panic_with_error!(&env, SettlementError::InvalidPaymentReference);
         }
         if amount < MIN_PAYMENT_AMOUNT {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+            panic_with_error!(&env, SettlementError::AmountTooSmall);
         }
 
         let payment_key = DataKey::Payment(reference.clone());
@@ -734,7 +919,11 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "payment_stored"), merchant.clone(), reference.clone()),
+            (
+                Symbol::new(&env, "payment_stored"),
+                merchant.clone(),
+                reference.clone(),
+            ),
             (),
         );
 
@@ -769,14 +958,18 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    /// * [`InvalidAmount`](SettlementError::InvalidAmount) — if `amount` is zero or negative.
+    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
+    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if amount <= 0 {
-            panic_with_error!(&env, SettlementError::InvalidAmount);
+        if amount == 0 {
+            panic_with_error!(&env, SettlementError::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, SettlementError::AmountNegative);
         }
         let rule = read_rule_or_default(&env, merchant);
         calculate_split(&env, amount, &rule)
@@ -787,12 +980,13 @@ impl SettlementContract {
         let key = DataKey::Payment(reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
         if record.is_some() {
-            let ttl = env.storage().persistent().get_ttl(&key);
-            if ttl < PAYMENT_TTL_THRESHOLD {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
-            }
+            // `extend_ttl` only writes when the current TTL is below
+            // `threshold`, so this has the same externally observable
+            // behavior as a manual get_ttl-then-extend check, without
+            // depending on `get_ttl`, which is test-only in production code.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
         }
         record
     }
@@ -815,19 +1009,303 @@ impl SettlementContract {
 
         payments
     }
+
+    /// Schedules an administrative operation to be executed after a timelock.
+    pub fn schedule(env: Env, caller: Address, operation: Operation, execute_in: u64) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, SettlementError::Unauthorized);
+        }
+        caller.require_auth();
+
+        if execute_in < DEFAULT_TIMELOCK_DELAY_SECONDS {
+            panic_with_error!(&env, SettlementError::ExecutionNotReady);
+        }
+
+        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let key = DataKey::ScheduledOperation(op_hash.clone());
+
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, SettlementError::OperationAlreadyScheduled);
+        }
+
+        let execute_at = env.ledger().timestamp() + execute_in;
+        env.storage().persistent().set(&key, &execute_at);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 17280 * 14, 17280 * 30);
+
+        env.events().publish(
+            (Symbol::new(&env, "op_scheduled"), op_hash),
+            (caller, execute_at),
+        );
+    }
+
+    /// Executes a previously scheduled administrative operation.
+    pub fn execute(env: Env, operation: Operation) {
+        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let key = DataKey::ScheduledOperation(op_hash.clone());
+
+        let execute_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, SettlementError::OperationNotScheduled));
+
+        if env.ledger().timestamp() < execute_at {
+            panic_with_error!(&env, SettlementError::ExecutionNotReady);
+        }
+
+        env.storage().persistent().remove(&key);
+
+        match operation {
+            Operation::UpdateGovernance(new_gov) => Self::_update_governance(&env, new_gov),
+            Operation::CancelRecovery => {
+                let admin = read_admin(&env);
+                admin.require_auth();
+                Self::_cancel_recovery(&env)
+            }
+            Operation::TransferAdmin(new_admin) => Self::_transfer_admin(&env, new_admin),
+            Operation::Upgrade(wasm_hash) => Self::_upgrade(&env, wasm_hash),
+            Operation::RegisterMerchant(merchant) => Self::_register_merchant(&env, merchant),
+            Operation::UnregisterMerchant(merchant) => Self::_unregister_merchant(&env, merchant),
+            Operation::SetSettlementRule(merchant, rule) => {
+                Self::_set_settlement_rule(&env, merchant, rule)
+            }
+            Operation::ClearSettlementRule(merchant) => {
+                Self::_clear_settlement_rule(&env, merchant)
+            }
+            Operation::SetDefaultRule(rule) => Self::_set_default_rule(&env, rule),
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "op_executed"), op_hash), ());
+    }
+
+    /// Cancels a scheduled administrative operation.
+    pub fn cancel(env: Env, caller: Address, operation: Operation) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, SettlementError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let key = DataKey::ScheduledOperation(op_hash.clone());
+
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, SettlementError::OperationNotScheduled);
+        }
+
+        env.storage().persistent().remove(&key);
+
+        env.events()
+            .publish((Symbol::new(&env, "op_cancelled"), op_hash), caller);
+    }
+
+    // --- Internal Admin Functions ---
+
+    fn _update_governance(env: &Env, new_governance: Address) {
+        assert_not_paused(env);
+        validate_governance(env, &new_governance);
+        let admin = read_admin(env);
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &new_governance);
+        env.events().publish(
+            (Symbol::new(env, "governance_updated"),),
+            (admin, new_governance),
+        );
+    }
+
+    fn _cancel_recovery(env: &Env) {
+        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+            panic_with_error!(env, SettlementError::RecoveryNotPending);
+        }
+        let admin = read_admin(env);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.events()
+            .publish((Symbol::new(env, "recovery_cancelled"),), admin);
+    }
+
+    fn _transfer_admin(env: &Env, new_admin: Address) {
+        let admin = read_admin(env);
+        validate_nonzero_address(env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        if new_admin == admin {
+            panic_with_error!(env, SettlementError::InvalidAdmin);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish((symbol_short!("admin"),), new_admin);
+    }
+
+    fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
+        let admin = read_admin(env);
+        env.events().publish(
+            (
+                Symbol::new(env, "contract_upgraded"),
+                new_wasm_hash.clone(),
+            ),
+            admin,
+        );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    fn _register_merchant(env: &Env, merchant: Address) {
+        assert_not_paused(env);
+        validate_nonzero_address(env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        let admin = read_admin(env);
+
+        let key = DataKey::Merchant(merchant.clone());
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(env, SettlementError::MerchantExists);
+        }
+
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
+        env.events()
+            .publish((Symbol::new(env, "merchant_registered"), merchant), admin);
+    }
+
+    fn _unregister_merchant(env: &Env, merchant: Address) {
+        assert_not_paused(env);
+        let admin = read_admin(env);
+
+        let key = DataKey::Merchant(merchant.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(env, SettlementError::MerchantMissing);
+        }
+
+        env.storage().persistent().remove(&key);
+
+        let rule_key = DataKey::Rule(merchant.clone());
+        let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
+        if old_rule.is_some() {
+            env.storage().persistent().remove(&rule_key);
+            env.events().publish(
+                (Symbol::new(env, "settlement_rule_cleared"), merchant.clone()),
+                (admin.clone(), old_rule.unwrap()),
+            );
+        }
+
+        env.events().publish(
+            (Symbol::new(env, "merchant_unregistered"), merchant),
+            admin,
+        );
+    }
+
+    fn _set_settlement_rule(env: &Env, merchant: Address, rule: SettlementRule) {
+        assert_not_paused(env);
+        let admin = read_admin(env);
+
+        if !is_merchant_registered_internal(env, merchant.clone()) {
+            panic_with_error!(env, SettlementError::MerchantMissing);
+        }
+        if rule.platform_fee_bps > BPS_DENOMINATOR || rule.network_fee_bps > BPS_DENOMINATOR {
+            panic_with_error!(env, SettlementError::InvalidFeeBps);
+        }
+        if rule.platform_fee_bps < MIN_FEE_BPS || rule.network_fee_bps < MIN_FEE_BPS {
+            panic_with_error!(env, SettlementError::InvalidFeeBps);
+        }
+        if rule.platform_fee_bps + rule.network_fee_bps > BPS_DENOMINATOR {
+            panic_with_error!(env, SettlementError::InvalidFeeBps);
+        }
+        if rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
+            panic_with_error!(env, SettlementError::InvalidSettlementDelay);
+        }
+
+        let prev = env
+            .storage()
+            .persistent()
+            .get::<_, SettlementRule>(&DataKey::Rule(merchant.clone()))
+            .unwrap_or_else(|| read_rule_or_default(env, merchant.clone()));
+
+        let key = DataKey::Rule(merchant.clone());
+        env.storage().persistent().set(&key, &rule);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
+
+        env.events().publish(
+            (Symbol::new(env, "settlement_rule_updated"), merchant),
+            (admin, prev, rule),
+        );
+    }
+
+    fn _clear_settlement_rule(env: &Env, merchant: Address) {
+        assert_not_paused(env);
+        let admin = read_admin(env);
+
+        let key = DataKey::Rule(merchant.clone());
+        let removed = env
+            .storage()
+            .persistent()
+            .get::<_, SettlementRule>(&key)
+            .unwrap_or_else(|| panic_with_error!(env, SettlementError::MerchantRuleNotSet));
+
+        env.storage().persistent().remove(&key);
+
+        let fallback = read_rule_or_default(env, merchant.clone());
+
+        env.events().publish(
+            (Symbol::new(env, "settlement_rule_cleared"), merchant),
+            (admin, removed, fallback),
+        );
+    }
+
+    fn _set_default_rule(env: &Env, new_rule: SettlementRule) {
+        assert_not_paused(env);
+        let admin = read_admin(env);
+
+        if new_rule.platform_fee_bps > BPS_DENOMINATOR || new_rule.network_fee_bps > BPS_DENOMINATOR
+        {
+            panic_with_error!(env, SettlementError::InvalidFeeBps);
+        }
+        if new_rule.platform_fee_bps < MIN_FEE_BPS || new_rule.network_fee_bps < MIN_FEE_BPS {
+            panic_with_error!(env, SettlementError::InvalidFeeBps);
+        }
+        if new_rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
+            panic_with_error!(env, SettlementError::InvalidSettlementDelay);
+        }
+
+        let prev = env
+            .storage()
+            .persistent()
+            .get::<_, SettlementRule>(&DataKey::DefaultRule)
+            .unwrap_or(BOOTSTRAP_DEFAULT_RULE);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DefaultRule, &new_rule);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DefaultRule,
+            RULE_TTL_THRESHOLD,
+            RULE_TTL_BUMP,
+        );
+
+        env.events().publish(
+            (Symbol::new(env, "default_rule_updated"),),
+            (admin, prev, new_rule),
+        );
+    }
 }
 
 /// Reads the configured admin address and refreshes the instance TTL so it remains available.
 fn read_admin(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::Admin)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
 fn read_governance(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+    env.storage()
+        .instance()
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Governance)
@@ -835,34 +1313,45 @@ fn read_governance(env: &Env) -> Address {
 }
 
 fn read_recovery_address(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
     env.storage()
         .instance()
-        .get(&DataKey::RecoveryAddress)
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::RecoveryAddress)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
 fn read_pending_recovery(env: &Env) -> PendingRecovery {
     env.storage()
         .instance()
-        .get(&DataKey::PendingRecovery)
+        .get(&CommonDataKey::PendingRecovery)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::RecoveryNotPending))
 }
 
 fn validate_governance(env: &Env, governance: &Address) {
-    validate_nonzero_address(env, governance, SettlementError::InvalidGovernance);
+    validate_nonzero_address(
+        env,
+        governance,
+        SettlementError::InvalidGovernance,
+        SettlementError::InvalidGovernance,
+    );
     let args: Vec<Val> = Vec::new(env);
     let _: Option<FeeConfig> =
         env.invoke_contract(governance, &Symbol::new(env, "get_fee_config"), args);
 }
 
-fn validate_nonzero_address(env: &Env, address: &Address, error: SettlementError) {
-    let zero_address = String::from_str(
-        env,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
-    if address.to_string().len() == 0 || address.to_string() == zero_address {
-        panic_with_error!(env, error);
+fn validate_nonzero_address(
+    env: &Env,
+    address: &Address,
+    empty_error: SettlementError,
+    zero_error: SettlementError,
+) {
+    if address.to_string().is_empty() {
+        panic_with_error!(env, empty_error);
+    }
+    if storage::is_zero_address(env, address) {
+        panic_with_error!(env, zero_error);
     }
 }
 
@@ -906,6 +1395,10 @@ fn read_rule_or_default(env: &Env, merchant: Address) -> SettlementRule {
             .extend_ttl(&default_key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
         return rule;
     }
+    // Protocol fee source: governance's FeeConfig, when available.
+    if let Some(rule) = read_governance_fee_rule(env) {
+        return rule;
+    }
     // Final fallback keeps the contract usable before any config is stored.
     env.events().publish(
         (Symbol::new(env, "bootstrap_fallback"),),
@@ -914,22 +1407,45 @@ fn read_rule_or_default(env: &Env, merchant: Address) -> SettlementRule {
     BOOTSTRAP_DEFAULT_RULE
 }
 
-/// Returns whether the contract is currently paused.
-fn is_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false)
+/// Attempts to read fee BPS from the configured governance contract.
+///
+/// Returns `None` when governance has no fee configuration yet or the call
+/// fails — callers then continue down the fallback chain to bootstrap.
+fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
+    let governance: Address = env.storage().instance().get(&DataKey::Governance)?;
+    let args: Vec<Val> = Vec::new(env);
+    match env.try_invoke_contract::<Option<FeeConfig>, SettlementError>(
+        &governance,
+        &Symbol::new(env, "get_fee_config"),
+        args,
+    ) {
+        Ok(Ok(Some(config))) => Some(SettlementRule {
+            platform_fee_bps: config.platform_fee_bps,
+            network_fee_bps: config.network_fee_bps,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        }),
+        _ => None,
+    }
 }
 
 /// Ensures the contract is not paused before mutating state or performing privileged actions.
 fn assert_not_paused(env: &Env) {
-    if is_paused(env) {
+    if storage::is_paused(env) {
         panic_with_error!(env, SettlementError::Paused);
     }
 }
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
+///
+/// # Known edge case: negative merchant amount
+///
+/// Ceiling rounding of both fees independently can make
+/// `platform_fee_amount + network_fee_amount > amount` for small gross amounts
+/// (e.g. `amount = 1`, `platform_fee_bps = 5000`, `network_fee_bps = 5000`),
+/// which yields a **negative** `merchant_amount`. This is intentional with the
+/// current rounding policy (fees are never under-collected); callers must treat
+/// a negative merchant payout as a known, documented outcome rather than a bug.
 fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
     let denom = BPS_DENOMINATOR as i128;
 
@@ -964,462 +1480,7 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{FromVal, IntoVal};
-
-    #[contract]
-    struct MockGovernance;
-
-    #[contractimpl]
-    impl MockGovernance {
-        pub fn get_fee_config(_env: Env) -> Option<FeeConfig> {
-            None
-        }
-    }
-
-    fn register_governance(env: &Env) -> Address {
-        env.register_contract(None, MockGovernance)
-    }
-
-    fn setup() -> (Env, SettlementContractClient<'static>, Address, Address) {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let recovery_address = Address::generate(&env);
-        let merchant = Address::generate(&env);
-        let governance = register_governance(&env);
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
-        client.init(&admin, &governance, &recovery_address);
-        (env, client, admin, merchant)
-    }
-
-    #[test]
-    fn executes_contract_wasm_upgrade_successfully() {
-        let (env, client, admin, _) = setup();
-        let wasm = soroban_sdk::Bytes::from_slice(&env, &[]);
-        let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
-        
-        let before = env.events().all().len();
-        // Verifies the structural update pass completes without panicking
-        client.upgrade(&new_wasm_hash);
-        
-        let events = env.events().all();
-        assert!(events.len() > before);
-        
-        let event = events.last().unwrap();
-        let (_contract_id, topics, data) = event;
-        
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "contract_upgraded")
-        );
-        assert_eq!(
-            BytesN::<32>::from_val(&env, &topics.get(1).unwrap()),
-            new_wasm_hash
-        );
-        assert_eq!(Address::from_val(&env, &data), admin);
-
-        // Ensure the upgraded contract remains callable and retains its state.
-        let upgraded_client = SettlementContractClient::new(&env, &client.address);
-        assert_eq!(upgraded_client.get_admin(), admin);
-    }
-
-    #[test]
-    fn emits_event_on_initialization() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
-
-        client.init(&admin);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), 1, "exactly one event emitted on init");
-
-        let (_contract_id, topics, data) = events.get(0).unwrap();
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "initialized")
-        );
-        assert_eq!(Address::from_val(&env, &data), admin);
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_double_initialization() {
-        let (env, client, admin, _) = setup();
-        let governance = register_governance(&env);
-        let recovery_address = Address::generate(&env);
-        client.init(&admin, &governance, &recovery_address);
-        let _ = env;
-    }
-
-    #[test]
-    #[should_panic(expected = "Error(Contract, #2)")]
-    fn get_admin_panics_before_init() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
-        client.get_admin();
-    }
-
-    #[test]
-    fn proposes_and_accepts_admin_successfully() {
-        let (env, client, admin, _) = setup();
-        let new_admin = Address::generate(&env);
-
-        assert_eq!(client.get_pending_admin(), None);
-
-        client.propose_admin(&new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-        assert_eq!(client.get_admin(), admin);
-
-        client.accept_admin();
-        assert_eq!(client.get_admin(), new_admin);
-        assert_eq!(client.get_pending_admin(), None);
-    }
-
-    #[test]
-    fn cancels_admin_proposal() {
-        let (env, client, admin, _) = setup();
-        let new_admin = Address::generate(&env);
-
-        client.propose_admin(&new_admin);
-        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
-
-        client.cancel_admin_transfer();
-        assert_eq!(client.get_pending_admin(), None);
-        assert_eq!(client.get_admin(), admin);
-    }
-
-    #[test]
-    fn registers_merchant_and_persists_flag() {
-        let (env, client, _admin, merchant) = setup();
-        let before = env.events().all().len();
-        client.register_merchant(&merchant);
-        assert!(client.is_merchant_registered(&merchant));
-        assert!(env.events().all().len() > before);
-    }
-
-    #[test]
-    fn update_governance_stores_validated_address() {
-        let (env, client, _admin, _merchant) = setup();
-        let new_governance = register_governance(&env);
-
-        client.update_governance(&new_governance);
-
-        assert_eq!(client.get_governance(), new_governance);
-    }
-
-    #[test]
-    fn recovery_executes_after_delay() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let admin = Address::generate(&env);
-        let recovery_address = Address::generate(&env);
-        let new_admin = Address::generate(&env);
-        let governance = register_governance(&env);
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
-
-        client.init(&admin, &governance, &recovery_address);
-        assert_eq!(client.get_recovery_address(), recovery_address);
-
-        client.initiate_recovery(&new_admin);
-        env.ledger()
-            .with_mut(|ledger| ledger.timestamp += RECOVERY_DELAY_SECONDS);
-        client.execute_recovery();
-
-        assert_eq!(client.get_admin(), new_admin);
-    }
-
-    #[test]
-    fn emits_event_on_registration() {
-        let (env, client, admin, merchant) = setup();
-
-        client.register_merchant(&merchant);
-
-        let events = env.events().all();
-        let event = events.last().unwrap();
-        let (_contract_id, topics, data) = event;
-
-        // Topic 0: Event Name symbol
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "merchant_registered")
-        );
-        // Topic 1: Merchant Address
-        assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), merchant);
-        // Data: Admin Address (the caller)
-        assert_eq!(Address::from_val(&env, &data), admin);
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_invalid_merchant_address() {
-        let (env, client, _admin, _merchant) = setup();
-        let zero_address = Address::from_string(&soroban_sdk::String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
-        client.register_merchant(&zero_address);
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_zero_address_admin_transfer() {
-        let (env, client, _admin, _merchant) = setup();
-        let zero_address = Address::from_string(&soroban_sdk::String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
-        client.transfer_admin(&zero_address);
-    }
-
-    #[test]
-    fn extends_ttl_when_updating_settlement_rule() {
-        let (env, client, _admin, merchant) = setup();
-        client.register_merchant(&merchant);
-
-        let rule = SettlementRule {
-            platform_fee_bps: 100,
-            network_fee_bps: 0,
-            settlement_delay_ledger: 0,
-            auto_settle: false,
-        };
-
-        // This will successfully write and extend the TTL for the rule
-        client.set_settlement_rule(&merchant, &rule);
-
-        // Verify the persistent entry exists
-        env.as_contract(&client.address, || {
-            let key = DataKey::Rule(merchant.clone());
-            assert!(env.storage().persistent().has(&key));
-        });
-    }
-
-    #[test]
-    fn set_default_rule_extends_ttl() {
-        let (env, client, _admin, _merchant) = setup();
-
-        let rule = SettlementRule {
-            platform_fee_bps: 300,
-            network_fee_bps: 100,
-            settlement_delay_ledger: 5,
-            auto_settle: true,
-        };
-        client.set_default_rule(&rule);
-
-        env.as_contract(&client.address, || {
-            let key = DataKey::DefaultRule;
-            assert!(env.storage().persistent().has(&key));
-            let ttl = env.storage().persistent().get_ttl(&key);
-            assert!(
-                ttl >= env.ledger().sequence() + RULE_TTL_BUMP,
-                "TTL must be extended to at least ledger + RULE_TTL_BUMP"
-            );
-        });
-    }
-
-    // Issue #252: the TTL must be refreshed on every write to the default rule,
-    // not just the first one — otherwise a rarely-updated (but frequently-read)
-    // default rule could still expire between updates.
-    #[test]
-    fn set_default_rule_extends_ttl_on_update() {
-        let (env, client, _admin, _merchant) = setup();
-
-        let first_rule = SettlementRule {
-            platform_fee_bps: 300,
-            network_fee_bps: 100,
-            settlement_delay_ledger: 5,
-            auto_settle: true,
-        };
-        client.set_default_rule(&first_rule);
-
-        // Advance the ledger past RULE_TTL_THRESHOLD so the remaining TTL from
-        // the first call drops below the threshold and a second write is
-        // actually required to bump it back up (extend_ttl is a no-op while
-        // the remaining TTL is still above the threshold). Advance in smaller
-        // hops, touching the contract via get_admin() between hops, so the
-        // instance's own (much shorter) TTL doesn't expire along the way.
-        for _ in 0..5 {
-            env.ledger().set_sequence_number(env.ledger().sequence() + 60_000);
-            client.get_admin();
-        }
-
-        let second_rule = SettlementRule {
-            platform_fee_bps: 400,
-            network_fee_bps: 150,
-            settlement_delay_ledger: 10,
-            auto_settle: false,
-        };
-        client.set_default_rule(&second_rule);
-
-        env.as_contract(&client.address, || {
-            let key = DataKey::DefaultRule;
-            let ttl = env.storage().persistent().get_ttl(&key);
-            assert!(
-                ttl >= RULE_TTL_BUMP,
-                "TTL must be refreshed to at least RULE_TTL_BUMP on every write, not just the first"
-            );
-        });
-    }
-
-    #[test]
-    fn store_payment_reference_extends_rule_ttl_on_read() {
-        let (env, client, _admin, merchant) = setup();
-        client.register_merchant(&merchant);
-
-        let rule = SettlementRule {
-            platform_fee_bps: 250,
-            network_fee_bps: 50,
-            settlement_delay_ledger: 0,
-            auto_settle: false,
-        };
-        client.set_settlement_rule(&merchant, &rule);
-
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
-
-        let reference = BytesN::from_array(&env, &[42; 32]);
-        client.store_payment_reference(&merchant, &reference, &10_000);
-
-        env.as_contract(&client.address, || {
-            let key = DataKey::Rule(merchant.clone());
-            assert!(env.storage().persistent().has(&key));
-            let ttl = env.storage().persistent().get_ttl(&key);
-            assert!(
-                ttl >= env.ledger().sequence() + RULE_TTL_BUMP,
-                "Merchant Rule TTL must be extended on read"
-            );
-        });
-    }
-
-    #[test]
-    fn calculate_fee_split_extends_default_rule_ttl_on_read() {
-        let (env, client, _admin, merchant) = setup();
-        client.register_merchant(&merchant);
-
-        let global_rule = SettlementRule {
-            platform_fee_bps: 200,
-            network_fee_bps: 50,
-            settlement_delay_ledger: 10,
-            auto_settle: true,
-        };
-        client.set_default_rule(&global_rule);
-
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
-
-        client.calculate_fee_split(&merchant, &50_000);
-
-        env.as_contract(&client.address, || {
-            let key = DataKey::DefaultRule;
-            assert!(env.storage().persistent().has(&key));
-            let ttl = env.storage().persistent().get_ttl(&key);
-            assert!(
-                ttl >= env.ledger().sequence() + RULE_TTL_BUMP,
-                "DefaultRule TTL must be extended on read"
-            );
-        });
-    }
-
-    #[test]
-    fn get_default_rule_extends_ttl_on_read() {
-        let (env, client, _admin, _merchant) = setup();
-
-        let global_rule = SettlementRule {
-            platform_fee_bps: 200,
-            network_fee_bps: 50,
-            settlement_delay_ledger: 10,
-            auto_settle: true,
-        };
-        client.set_default_rule(&global_rule);
-
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1000);
-
-        let retrieved = client.get_default_rule();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().platform_fee_bps, 200);
-
-        env.as_contract(&client.address, || {
-            let key = DataKey::DefaultRule;
-            assert!(env.storage().persistent().has(&key));
-            let ttl = env.storage().persistent().get_ttl(&key);
-            assert!(
-                ttl >= env.ledger().sequence() + RULE_TTL_BUMP,
-                "DefaultRule TTL must be extended on public read via get_default_rule"
-            );
-        });
-    }
-
-    #[test]
-    fn sets_and_reads_settlement_rule() {
-        let (env, client, _admin, merchant) = setup();
-        client.register_merchant(&merchant);
-
-        let rule = SettlementRule {
-            platform_fee_bps: 175,
-            network_fee_bps: 25,
-            settlement_delay_ledger: 42,
-            auto_settle: true,
-        };
-
-        let prev_count = env.events().all().len();
-        client.set_settlement_rule(&merchant, &rule);
-        let got = client
-            .get_settlement_rule(&merchant)
-            .expect("expected settlement rule");
-
-        assert_eq!(got.platform_fee_bps, 175);
-        assert_eq!(got.network_fee_bps, 25);
-        assert_eq!(got.settlement_delay_ledger, 42);
-        assert!(got.auto_settle);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
-
-        let (_contract_id, topics, _data) = events.get(prev_count).unwrap();
-
-        // Topic[0] must be the fixed event-name symbol
-        assert_eq!(topics.len(), 2);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "settlement_rule_updated")
-        );
-        // Topic[1] must be the merchant (rule identifier)
-        assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), merchant);
-    }
-
-    #[test]
-    fn emits_structured_event_when_updating_rule() {
-        let (env, client, _admin, merchant) = setup();
-        client.register_merchant(&merchant);
-
-        let first_rule = SettlementRule {
-            platform_fee_bps: 100,
-            network_fee_bps: 0,
-            settlement_delay_ledger: 10,
-            auto_settle: false,
-        };
-        client.set_settlement_rule(&merchant, &first_rule);
-
-        let second_rule = SettlementRule {
-            platform_fee_bps: 200,
-            network_fee_bps: 50,
-            settlement_delay_ledger: 20,
-            auto_settle: true,
-        };
-
-        let prev_count = env.events().all().len();
-        client.set_settlement_rule(&merchant, &second_rule);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
+mod integration_tests;
 
         let (_contract_id, topics, _data) = events.get(prev_count).unwrap();
 
