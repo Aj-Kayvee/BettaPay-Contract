@@ -713,9 +713,7 @@ impl SettlementContract {
     /// - `previous`: the rule values before the update (or system defaults on first set)
     /// - `current`: the new rule values after the update
     pub fn set_settlement_rule(env: Env, merchant: Address, rule: SettlementRule) {
-        assert_not_paused(&env);
-        let admin = read_admin(&env);
-        admin.require_auth();
+        let admin = authorized_admin(&env);
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -1441,6 +1439,18 @@ fn assert_not_paused(env: &Env) {
     if storage::is_paused(env) {
         panic_with_error!(env, SettlementError::Paused);
     }
+}
+
+/// Reads the admin, checks pause state, and requires admin authorization in a single call.
+///
+/// Every admin-guarded mutation must use this helper instead of calling
+/// `assert_not_paused`, `read_admin`, and `require_auth` separately, so the
+/// pause check always happens before admin authentication.
+fn authorized_admin(env: &Env) -> Address {
+    assert_not_paused(env);
+    let admin = read_admin(env);
+    admin.require_auth();
+    admin
 }
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
