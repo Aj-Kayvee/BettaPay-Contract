@@ -299,6 +299,14 @@ pub enum GovernanceError {
     AlreadyPaused = 12,
     /// `unpause` was called while the contract was already unpaused.
     AlreadyUnpaused = 13,
+    /// The scheduled operation is not yet ready for execution.
+    ExecutionNotReady = 14,
+    /// The operation has not been scheduled.
+    OperationNotScheduled = 15,
+    /// The operation has already been scheduled.
+    OperationAlreadyScheduled = 16,
+    /// The deployed WASM does not implement the required interface.
+    InvalidWasmInterface = 17,
     /// The provided multisig threshold is invalid.
     InvalidThreshold = 14,
 }
@@ -308,6 +316,10 @@ pub struct GovernanceContract;
 
 #[contractimpl]
 impl GovernanceContract {
+    pub fn supports_interface(_env: Env, version: u32) -> bool {
+        version == 1
+    }
+
     /// Initialises the governance contract and sets the initial administrator.
     ///
     /// Must be called exactly once after deployment. The caller is recorded as the
@@ -369,6 +381,45 @@ impl GovernanceContract {
     pub fn get_recovery_address(env: Env) -> Address {
         read_recovery_address(&env)
     }
+
+    /// Upgrades the contract Wasm code to a new version.
+    ///
+    /// This function replaces only the contract's executable Wasm code;
+    /// all persistent and instance storage entries remain intact. A
+    /// separate storage-migration function should be written and called
+    /// after the upgrade if the new code expects a different schema.
+    ///
+    /// ### Events
+    /// - Emits `contract_upgraded` with topic
+    ///   `(Symbol("contract_upgraded"), caller)` and data
+    ///   `(new_wasm_hash)`.
+    ///
+    /// ### Panics
+    /// - If the caller is not the stored admin.
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        let admin = read_admin(&env);
+        if caller != admin {
+            panic_with_error!(&env, GovernanceError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let salt = BytesN::from_array(&env, &[0u8; 32]);
+        let temp_contract = env
+            .deployer()
+            .with_current_contract(salt)
+            .deploy(new_wasm_hash.clone());
+        let args: Vec<Val> = Vec::from_array(&env, [1u32.into_val(&env)]);
+        let is_supported: bool = match env.try_invoke_contract::<bool, soroban_sdk::ConversionError>(
+            &temp_contract,
+            &Symbol::new(&env, "supports_interface"),
+            args,
+        ) {
+            Ok(Ok(val)) => val,
+            _ => false,
+        };
+        if !is_supported {
+            panic_with_error!(&env, GovernanceError::InvalidWasmInterface);
+        }
 
     pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
@@ -870,7 +921,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn upload_test_wasm(env: &Env) -> BytesN<32> {
-        let wasm = Bytes::from_slice(env, &[]);
+        let wasm = Bytes::from_slice(env, GovernanceContract::WASM);
         env.deployer().upload_contract_wasm(wasm)
     }
 
@@ -883,6 +934,15 @@ mod tests {
 
         let upgraded_client = GovernanceContractClient::new(&env, &client.address);
         assert_eq!(upgraded_client.get_admin(), admins);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #17)")]
+    fn governance_rejects_upgrade_with_invalid_wasm_interface() {
+        let (env, client, admin) = setup();
+        let wasm = Bytes::from_slice(&env, &[]);
+        let invalid_wasm_hash = env.deployer().upload_contract_wasm(wasm);
+        client.upgrade(&admin, &invalid_wasm_hash);
     }
 
     #[test]

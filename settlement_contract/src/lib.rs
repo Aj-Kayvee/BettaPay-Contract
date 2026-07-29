@@ -380,6 +380,14 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// The scheduled operation is not yet ready for execution.
+    ExecutionNotReady = 22,
+    /// The operation has not been scheduled.
+    OperationNotScheduled = 23,
+    /// The operation has already been scheduled.
+    OperationAlreadyScheduled = 24,
+    /// The deployed WASM does not implement the required interface.
+    InvalidWasmInterface = 25,
     /// The provided multisig threshold is invalid.
     InvalidThreshold = 22,
 }
@@ -389,6 +397,9 @@ pub struct SettlementContract;
 
 #[contractimpl]
 impl SettlementContract {
+    pub fn supports_interface(_env: Env, version: u32) -> bool {
+        version == 1
+    }
     /// Initialize the contract with the given admin address.
     ///
     /// # Panics
@@ -534,6 +545,24 @@ impl SettlementContract {
     pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();
+
+        let salt = BytesN::from_array(&env, &[0u8; 32]);
+        let temp_contract = env
+            .deployer()
+            .with_current_contract(salt)
+            .deploy(new_wasm_hash.clone());
+        let args: Vec<Val> = Vec::from_array(&env, [1u32.into_val(&env)]);
+        let is_supported: bool = match env.try_invoke_contract::<bool, soroban_sdk::ConversionError>(
+            &temp_contract,
+            &Symbol::new(&env, "supports_interface"),
+            args,
+        ) {
+            Ok(Ok(val)) => val,
+            _ => false,
+        };
+        if !is_supported {
+            panic_with_error!(&env, SettlementError::InvalidWasmInterface);
+        }
 
         let event_wasm_hash = new_wasm_hash.clone();
         env.events().publish(
