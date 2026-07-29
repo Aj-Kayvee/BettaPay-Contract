@@ -623,6 +623,18 @@ impl SettlementContract {
         assert_not_paused(&env);
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();
+    /// ## Emitted Event: `settlement_rule_updated`
+    ///
+    /// **Topics**: `(Symbol("settlement_rule_updated"), Address rule_id)`
+    /// - First topic: fixed event-name symbol for filtering by event type
+    /// - Second topic: the merchant address identifying which rule was updated
+    ///
+    /// **Data**: `(Address caller, SettlementRule previous, SettlementRule current)`
+    /// - `caller`: the admin who authorized the rule change
+    /// - `previous`: the rule values before the update (or system defaults on first set)
+    /// - `current`: the new rule values after the update
+    pub fn set_settlement_rule(env: Env, merchant: Address, rule: SettlementRule) {
+        let admin = authorized_admin(&env);
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -811,7 +823,14 @@ impl SettlementContract {
     }
 
     /// Returns `true` if the given address is a registered merchant, `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     pub fn is_merchant_registered(env: Env, merchant: Address) -> bool {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(&env, SettlementError::NotInitialized);
+        }
         is_merchant_registered_internal(&env, merchant)
     }
 
@@ -1365,6 +1384,18 @@ fn assert_not_paused(env: &Env) {
     if storage::is_paused(env) {
         panic_with_error!(env, SettlementError::Paused);
     }
+}
+
+/// Reads the admin, checks pause state, and requires admin authorization in a single call.
+///
+/// Every admin-guarded mutation must use this helper instead of calling
+/// `assert_not_paused`, `read_admin`, and `require_auth` separately, so the
+/// pause check always happens before admin authentication.
+fn authorized_admin(env: &Env) -> Address {
+    assert_not_paused(env);
+    let admin = read_admin(env);
+    admin.require_auth();
+    admin
 }
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
