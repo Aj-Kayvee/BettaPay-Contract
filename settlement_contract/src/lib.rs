@@ -931,7 +931,14 @@ impl SettlementContract {
     }
 
     /// Returns `true` if the given address is a registered merchant, `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     pub fn is_merchant_registered(env: Env, merchant: Address) -> bool {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(&env, SettlementError::NotInitialized);
+        }
         is_merchant_registered_internal(&env, merchant)
     }
 
