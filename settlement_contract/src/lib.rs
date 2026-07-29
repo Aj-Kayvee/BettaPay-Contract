@@ -319,6 +319,12 @@ pub enum SettlementError {
     /// basis points would overflow `i128`. Raised by `calculate_split`
     /// before the multiplication is attempted.
     AmountOverflow = 19,
+    /// `pause()` was called but the contract is already paused.
+    /// Prevents redundant state writes and duplicate events.
+    AlreadyPaused = 22,
+    /// `unpause()` was called but the contract is already unpaused.
+    /// Prevents redundant state writes and duplicate events.
+    AlreadyUnpaused = 23,
 }
 
 #[contract]
@@ -477,6 +483,7 @@ impl SettlementContract {
     ///
     /// # Panics
     ///
+    /// * [`AlreadyPaused`](SettlementError::AlreadyPaused) — if the contract is already paused.
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
     ///
@@ -487,6 +494,9 @@ impl SettlementContract {
     pub fn pause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
+        if is_paused(&env) {
+            panic_with_error!(&env, SettlementError::AlreadyPaused);
+        }
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish((symbol_short!("pause"),), true);
     }
@@ -495,6 +505,7 @@ impl SettlementContract {
     ///
     /// # Panics
     ///
+    /// * [`AlreadyUnpaused`](SettlementError::AlreadyUnpaused) — if the contract is already unpaused.
     /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
     /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
     ///
@@ -505,6 +516,9 @@ impl SettlementContract {
     pub fn unpause(env: Env) {
         let admin = read_admin(&env);
         admin.require_auth();
+        if !is_paused(&env) {
+            panic_with_error!(&env, SettlementError::AlreadyUnpaused);
+        }
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("unpause"),), false);
     }
