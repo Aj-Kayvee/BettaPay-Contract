@@ -153,8 +153,8 @@ const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 const LEDGERS_PER_DAY: u32 = 17280;
 
 // TTL thresholds and bumps use LEDGERS_PER_DAY for readability.
-const PAYMENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;  // 14 days
-const PAYMENT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;       // 30 days
+const PAYMENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14; // 14 days
+const PAYMENT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30; // 30 days
 const RULE_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
 const RULE_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
 const MERCHANT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
@@ -581,7 +581,6 @@ impl SettlementContract {
             .publish((symbol_short!("pause"),), (admin, true));
     }
 
-    
     /// Unpause the contract, re-enabling paused operations.
     ///
     /// # Panics
@@ -604,7 +603,6 @@ impl SettlementContract {
             .publish((symbol_short!("unpause"),), (admin, false));
     }
 
-    
     /// Returns `true` if the contract is currently paused, `false` otherwise.
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
@@ -1132,7 +1130,12 @@ impl SettlementContract {
 
     fn _transfer_admin(env: &Env, new_admin: Address) {
         let admin = read_admin(env);
-        validate_nonzero_address(env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        validate_nonzero_address(
+            env,
+            &new_admin,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
         if new_admin == admin {
             panic_with_error!(env, SettlementError::InvalidAdmin);
         }
@@ -1143,10 +1146,7 @@ impl SettlementContract {
     fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
         let admin = read_admin(env);
         env.events().publish(
-            (
-                Symbol::new(env, "contract_upgraded"),
-                new_wasm_hash.clone(),
-            ),
+            (Symbol::new(env, "contract_upgraded"), new_wasm_hash.clone()),
             admin,
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -1154,7 +1154,12 @@ impl SettlementContract {
 
     fn _register_merchant(env: &Env, merchant: Address) {
         assert_not_paused(env);
-        validate_nonzero_address(env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        validate_nonzero_address(
+            env,
+            &merchant,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
         let admin = read_admin(env);
 
         let key = DataKey::Merchant(merchant.clone());
@@ -1186,15 +1191,16 @@ impl SettlementContract {
         if old_rule.is_some() {
             env.storage().persistent().remove(&rule_key);
             env.events().publish(
-                (Symbol::new(env, "settlement_rule_cleared"), merchant.clone()),
+                (
+                    Symbol::new(env, "settlement_rule_cleared"),
+                    merchant.clone(),
+                ),
                 (admin.clone(), old_rule.unwrap()),
             );
         }
 
-        env.events().publish(
-            (Symbol::new(env, "merchant_unregistered"), merchant),
-            admin,
-        );
+        env.events()
+            .publish((Symbol::new(env, "merchant_unregistered"), merchant), admin);
     }
 
     fn _set_settlement_rule(env: &Env, merchant: Address, rule: SettlementRule) {
@@ -1484,6 +1490,38 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
 #[cfg(test)]
 mod integration_tests;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{FromVal, IntoVal};
+
+    #[test]
+    fn emits_structured_event_when_updating_rule() {
+        let (env, client, _admin, merchant) = setup();
+        client.register_merchant(&merchant);
+
+        let first_rule = SettlementRule {
+            platform_fee_bps: 100,
+            network_fee_bps: 5,
+            settlement_delay_ledger: 10,
+            auto_settle: false,
+        };
+        client.set_settlement_rule(&merchant, &first_rule);
+
+        let second_rule = SettlementRule {
+            platform_fee_bps: 200,
+            network_fee_bps: 50,
+            settlement_delay_ledger: 20,
+            auto_settle: true,
+        };
+
+        let prev_count = env.events().all().len();
+        client.set_settlement_rule(&merchant, &second_rule);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
+
         let (_contract_id, topics, _data) = events.get(prev_count).unwrap();
 
         // Topic[0] must be the fixed event-name symbol
@@ -1688,3 +1726,4 @@ mod integration_tests;
             );
         }
     }
+}
