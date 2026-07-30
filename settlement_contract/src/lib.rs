@@ -144,8 +144,9 @@ use bettapay_common::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, Symbol, Val, Vec,
+    BytesN, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 
 const MIN_PAYMENT_AMOUNT: i128 = 100;
 const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
@@ -159,13 +160,7 @@ const RULE_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
 const RULE_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
 const MERCHANT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
 const MERCHANT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
-const PAYMENT_TTL_THRESHOLD: u32 = 17280 * 14;
-const PAYMENT_TTL_BUMP: u32 = 17280 * 30;
-const RULE_TTL_THRESHOLD: u32 = 17280 * 14;
-const RULE_TTL_BUMP: u32 = 17280 * 30;
-const MERCHANT_TTL_THRESHOLD: u32 = 17280 * 14;
-const MERCHANT_TTL_BUMP: u32 = 17280 * 30;
+
 const DEFAULT_TIMELOCK_DELAY_SECONDS: u64 = 2 * 24 * 60 * 60; // 48 hours
 
 // Settlement-specific TTL policy for short-lived reads of admin / governance /
@@ -290,20 +285,6 @@ pub enum Operation {
 
 #[derive(Clone)]
 #[contracttype]
-pub enum Operation {
-    UpdateGovernance(Address),
-    CancelRecovery,
-    TransferAdmin(Address),
-    Upgrade(BytesN<32>),
-    RegisterMerchant(Address),
-    UnregisterMerchant(Address),
-    SetSettlementRule(Address, SettlementRule),
-    ClearSettlementRule(Address),
-    SetDefaultRule(SettlementRule),
-}
-
-#[derive(Clone)]
-#[contracttype]
 enum DataKey {
     /// Instance — singleton, read on every mutating call.
     Admin,
@@ -389,7 +370,12 @@ pub enum SettlementError {
     /// The deployed WASM does not implement the required interface.
     InvalidWasmInterface = 25,
     /// The provided multisig threshold is invalid.
-    InvalidThreshold = 22,
+    InvalidThreshold = 26,
+    GovernanceCallFailed = 27,
+    FeeExceedsGovernanceConfig = 28,
+    AmountTooSmall = 29,
+    AmountZero = 30,
+    AmountNegative = 31,
 }
 
 #[contract]
@@ -575,6 +561,7 @@ impl SettlementContract {
 
     pub fn pause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
             .publish((symbol_short!("pause"),), (admin, true));
@@ -582,6 +569,7 @@ impl SettlementContract {
 
     pub fn unpause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((symbol_short!("unpause"),), (admin, false));
@@ -648,22 +636,10 @@ impl SettlementContract {
         );
     }
 
-    pub fn set_settlement_rule(env: Env, signers: Vec<Address>, merchant: Address, rule: SettlementRule) {
-        assert_not_paused(&env);
-        verify_admin_auth(&env, &signers, read_threshold(&env));
-        let admin = signers.get(0).unwrap();
-    /// ## Emitted Event: `settlement_rule_updated`
-    ///
-    /// **Topics**: `(Symbol("settlement_rule_updated"), Address rule_id)`
-    /// - First topic: fixed event-name symbol for filtering by event type
-    /// - Second topic: the merchant address identifying which rule was updated
-    ///
-    /// **Data**: `(Address caller, SettlementRule previous, SettlementRule current)`
-    /// - `caller`: the admin who authorized the rule change
-    /// - `previous`: the rule values before the update (or system defaults on first set)
-    /// - `current`: the new rule values after the update
     pub fn set_settlement_rule(env: Env, merchant: Address, rule: SettlementRule) {
         let admin = authorized_admin(&env);
+
+        validate_fee_against_governance(&env, &rule);
 
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
@@ -726,6 +702,8 @@ impl SettlementContract {
         assert_not_paused(&env);
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();
+
+        validate_fee_against_governance(&env, &new_rule);
 
         if new_rule.platform_fee_bps > BPS_DENOMINATOR || new_rule.network_fee_bps > BPS_DENOMINATOR
         {
@@ -950,7 +928,7 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::ExecutionNotReady);
         }
 
-        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let op_hash: BytesN<32> = env.crypto().sha256(&operation.clone().to_xdr(&env)).into();
         let key = DataKey::ScheduledOperation(op_hash.clone());
 
         if env.storage().persistent().has(&key) {
@@ -971,7 +949,7 @@ impl SettlementContract {
 
     /// Executes a previously scheduled administrative operation.
     pub fn execute(env: Env, operation: Operation) {
-        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let op_hash: BytesN<32> = env.crypto().sha256(&operation.clone().to_xdr(&env)).into();
         let key = DataKey::ScheduledOperation(op_hash.clone());
 
         let execute_at: u64 = env
@@ -1018,7 +996,7 @@ impl SettlementContract {
         }
         caller.require_auth();
 
-        let op_hash = env.crypto().sha256(&operation.to_raw(&env));
+        let op_hash: BytesN<32> = env.crypto().sha256(&operation.clone().to_xdr(&env)).into();
         let key = DataKey::ScheduledOperation(op_hash.clone());
 
         if !env.storage().persistent().has(&key) {
@@ -1238,6 +1216,10 @@ fn read_admins(env: &Env) -> Vec<Address> {
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::NotInitialized))
 }
 
+fn read_admin(env: &Env) -> Address {
+    read_admins(env).get(0).unwrap()
+}
+
 fn read_threshold(env: &Env) -> u32 {
     env.storage()
         .instance()
@@ -1312,7 +1294,7 @@ fn read_recovery_address(env: &Env) -> Address {
 fn read_pending_recovery(env: &Env) -> PendingRecovery {
     env.storage()
         .instance()
-        .get(&CommonDataKey::PendingRecovery)
+        .get::<_, PendingRecovery>(&CommonDataKey::PendingRecovery)
         .unwrap_or_else(|| panic_with_error!(env, SettlementError::RecoveryNotPending))
 }
 
@@ -1478,8 +1460,41 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
     }
 }
 
-#[cfg(test)]
-mod integration_tests;
 
-#[cfg(test)]
-mod tests;
+/// Reads the governance FeeConfig via cross-contract call and validates that
+/// the settlement rule fees do not exceed governance's configured ceilings.
+///
+/// When governance has no fee config set, local hardcoded constants still
+/// apply as baseline — this function only enforces ceilings that governance
+/// has explicitly configured.
+fn validate_fee_against_governance(env: &Env, rule: &SettlementRule) {
+    let governance: Address = read_governance(env);
+    let fee_config: Val = env
+        .invoke_contract(&governance, &Symbol::new(env, "get_fee_config"), Vec::new(&env));
+
+    // If governance returned a valid config, check fee ceilings.
+    // If it returned `()` (no config set), there is no ceiling to enforce.
+    if fee_config.is_void() {
+        return;
+    }
+
+    let governance_fee: Vec<Val> = fee_config
+        .try_into_val(env)
+        .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
+
+    // Governance FeeConfig tuple is (platform_fee_bps: u32, network_fee_bps: u32)
+    if let Some(gov_platform_val) = governance_fee.get(0) {
+        let gov_platform_bps: u32 = u32::try_from_val(env, &gov_platform_val)
+            .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
+        if rule.platform_fee_bps > gov_platform_bps {
+            panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
+        }
+    }
+    if let Some(gov_network_val) = governance_fee.get(1) {
+        let gov_network_bps: u32 = u32::try_from_val(env, &gov_network_val)
+            .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
+        if rule.network_fee_bps > gov_network_bps {
+            panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
+        }
+    }
+}

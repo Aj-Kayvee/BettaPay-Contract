@@ -200,7 +200,7 @@
             },
             "ext": "v0"
           },
-          518400
+          4095
         ]
       ],
       [
@@ -520,7 +520,7 @@
               },
               {
                 "error": {
-                  "contract": 22
+                  "contract": 7
                 }
               }
             ],
@@ -530,7 +530,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 22
+                  "u32": 7
                 }
               ]
             }
@@ -552,7 +552,7 @@
               },
               {
                 "error": {
-                  "contract": 22
+                  "contract": 7
                 }
               }
             ],
@@ -577,7 +577,7 @@
               },
               {
                 "error": {
-                  "contract": 22
+                  "contract": 7
                 }
               }
             ],
@@ -602,7 +602,7 @@
               },
               {
                 "error": {
-                  "contract": 22
+                  "contract": 7
                 }
               }
             ],
@@ -650,7 +650,7 @@
               },
               {
                 "error": {
-                  "contract": 22
+                  "contract": 7
                 }
               }
             ],
