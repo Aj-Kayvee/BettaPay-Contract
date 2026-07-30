@@ -157,7 +157,8 @@
 
 use bettapay_common::{
     constants::{
-        MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS, TTL_BUMP_LEDGERS, TTL_THRESHOLD_LEDGERS,
+        BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS, TTL_BUMP_LEDGERS,
+        TTL_THRESHOLD_LEDGERS,
     },
     events::{self, AdminTransferred, PendingRecovery},
     storage::{self, CommonDataKey},
@@ -166,20 +167,6 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
     String, Symbol, Vec, SymbolStr, TryFromVal,
 };
-
-/// Minimum allowed fee in basis points (0.05%).
-const MIN_FEE_BPS: u32 = 5;
-/// Maximum allowed fee in basis points (50%).
-const MAX_FEE_BPS: u32 = 5_000;
-const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
-const FEE_TTL_BUMP: u32 = 17280 * 30;
-const ANCHOR_TTL_THRESHOLD: u32 = 17280 * 14;
-const ANCHOR_TTL_BUMP: u32 = 17280 * 30;
-const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
-const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
-const ADMIN_TTL_THRESHOLD: u32 = 17280 * 14;
-const ADMIN_TTL_BUMP: u32 = 17280 * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 const DEFAULT_TIMELOCK_DELAY_SECONDS: u64 = 2 * 24 * 60 * 60; // 48 hours
 #[derive(Clone)]
@@ -217,18 +204,6 @@ const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 // `bettapay_common::storage::CommonDataKey` instead of here - see that
 // type's doc comment for why a shared key type is safe to mix with this
 // contract's own storage without a migration.
-#[derive(Clone)]
-#[contracttype]
-pub enum Operation {
-    Upgrade(BytesN<32>),
-    TransferAdmin(Address),
-    CancelRecovery,
-    UpdateSystemParam(Symbol, i128),
-    SetFeeConfig(FeeConfig),
-    UpsertAnchor(Address, Address),
-    RemoveAnchor(Address),
-}
-
 #[derive(Clone)]
 #[contracttype]
 pub enum Operation {
@@ -589,7 +564,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::InvalidFeeBps);
         }
 
-        if config.platform_fee_bps + config.network_fee_bps > 10_000 {
+        if config.platform_fee_bps + config.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(&env, GovernanceError::InvalidFeeBps);
         }
 
@@ -669,14 +644,16 @@ impl GovernanceContract {
             admin,
         );
     }
-    
+
     fn _transfer_admin(env: &Env, new_admin: Address) {
         let admin = read_admin(env);
-        validate_nonzero_address(env, &new_admin, GovernanceError::InvalidAdmin);
+        assert_not_zero(env, &new_admin, GovernanceError::InvalidAdmin);
         if admin == new_admin {
             panic_with_error!(env, GovernanceError::InvalidAdmin);
         }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::Admin, &new_admin);
         env.events().publish(
             (Symbol::new(env, "admin_transferred"),),
             AdminTransferred {
@@ -685,20 +662,26 @@ impl GovernanceContract {
             },
         );
     }
-    
+
     fn _cancel_recovery(env: &Env) {
-        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
             panic_with_error!(env, GovernanceError::RecoveryNotPending);
         }
         let admin = read_admin(env);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events()
             .publish((Symbol::new(env, "recovery_cancelled"),), admin);
     }
-    
+
     fn _update_system_param(env: &Env, key: Symbol, value: i128) {
         assert_not_paused(env);
-        if key.to_string().len() > 32 {
+        if symbol_len(env, &key) > 32 {
             panic_with_error!(env, GovernanceError::InvalidParamValue);
         }
         if value < 0 {
@@ -708,7 +691,7 @@ impl GovernanceContract {
         let storage_key = DataKey::SystemParam(key.clone());
         let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
         env.storage().persistent().set(&storage_key, &value);
-    
+
         let admin = read_admin(env);
         env.events().publish(
             (Symbol::new(env, "sys_param_updated"), key),
@@ -716,7 +699,7 @@ impl GovernanceContract {
         );
     }
 
-     fn _set_fee_config(env: &Env, config: FeeConfig) {
+    fn _set_fee_config(env: &Env, config: FeeConfig) {
         assert_not_paused(env);
         if config.platform_fee_bps < MIN_FEE_BPS
             || config.platform_fee_bps > MAX_FEE_BPS
@@ -725,10 +708,10 @@ impl GovernanceContract {
         {
             panic_with_error!(env, GovernanceError::InvalidFeeBps);
         }
-        if config.platform_fee_bps + config.network_fee_bps > 10_000 {
+        if config.platform_fee_bps + config.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(env, GovernanceError::InvalidFeeBps);
         }
-    
+
         let key = DataKey::FeeConfig;
         env.storage().persistent().set(&key, &config);
         env.storage()
@@ -739,7 +722,7 @@ impl GovernanceContract {
         env.events()
             .publish((Symbol::new(env, "fee_config_updated"),), (admin, config));
     }
-    
+
     fn _upsert_anchor(env: &Env, asset: Address, anchor: Address) {
         assert_not_paused(env);
         let key = DataKey::Anchor(asset.clone());
@@ -751,7 +734,7 @@ impl GovernanceContract {
             (old_anchor, anchor),
         );
     }
-    
+
     fn _remove_anchor(env: &Env, asset: Address) {
         assert_not_paused(env);
         let key = DataKey::Anchor(asset.clone());
@@ -872,6 +855,15 @@ fn symbol_len(env: &Env, key: &Symbol) -> usize {
     SymbolStr::try_from_val(env, &key.to_symbol_val())
         .map(|s| s.len())
         .unwrap_or(0)
+}
+
+/// Computes a deterministic SHA-256 hash of an `Operation` by serializing it
+/// to XDR and hashing the resulting bytes. Used as the key for scheduled
+/// operations.
+fn operation_hash(env: &Env, operation: &Operation) -> BytesN<32> {
+    let val: Val = operation.clone().into_val(env);
+    let xdr = val.to_xdr(env);
+    env.crypto().sha256(&xdr)
 }
 
 /// Shared test setup used across the main test module and the anchor_*

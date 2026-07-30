@@ -153,8 +153,8 @@ const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 const LEDGERS_PER_DAY: u32 = 17280;
 
 // TTL thresholds and bumps use LEDGERS_PER_DAY for readability.
-const PAYMENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;  // 14 days
-const PAYMENT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;       // 30 days
+const PAYMENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14; // 14 days
+const PAYMENT_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30; // 30 days
 const RULE_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
 const RULE_TTL_BUMP: u32 = LEDGERS_PER_DAY * 30;
 const MERCHANT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 14;
@@ -1058,7 +1058,12 @@ impl SettlementContract {
 
     fn _transfer_admin(env: &Env, new_admin: Address) {
         let admin = read_admin(env);
-        validate_nonzero_address(env, &new_admin, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        validate_nonzero_address(
+            env,
+            &new_admin,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
         if new_admin == admin {
             panic_with_error!(env, SettlementError::InvalidAdmin);
         }
@@ -1069,10 +1074,7 @@ impl SettlementContract {
     fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
         let admin = read_admin(env);
         env.events().publish(
-            (
-                Symbol::new(env, "contract_upgraded"),
-                new_wasm_hash.clone(),
-            ),
+            (Symbol::new(env, "contract_upgraded"), new_wasm_hash.clone()),
             admin,
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -1080,7 +1082,12 @@ impl SettlementContract {
 
     fn _register_merchant(env: &Env, merchant: Address) {
         assert_not_paused(env);
-        validate_nonzero_address(env, &merchant, SettlementError::EmptyAddress, SettlementError::ZeroAddress);
+        validate_nonzero_address(
+            env,
+            &merchant,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
         let admin = read_admin(env);
 
         let key = DataKey::Merchant(merchant.clone());
@@ -1112,15 +1119,16 @@ impl SettlementContract {
         if old_rule.is_some() {
             env.storage().persistent().remove(&rule_key);
             env.events().publish(
-                (Symbol::new(env, "settlement_rule_cleared"), merchant.clone()),
+                (
+                    Symbol::new(env, "settlement_rule_cleared"),
+                    merchant.clone(),
+                ),
                 (admin.clone(), old_rule.unwrap()),
             );
         }
 
-        env.events().publish(
-            (Symbol::new(env, "merchant_unregistered"), merchant),
-            admin,
-        );
+        env.events()
+            .publish((Symbol::new(env, "merchant_unregistered"), merchant), admin);
     }
 
     fn _set_settlement_rule(env: &Env, merchant: Address, rule: SettlementRule) {
