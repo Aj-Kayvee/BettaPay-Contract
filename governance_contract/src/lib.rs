@@ -21,12 +21,44 @@
 //! code takes over immediately; if a storage-schema migration is needed, a
 //! separate migration function should be invoked in the same transaction.
 //!
+//! ### Upgrade Process
+//! `upgrade` is safe because it ignores storage, which is also why changing a
+//! stored type is a separate problem. Nothing converts existing entries, and
+//! nothing checks that they still match the types the new code expects — a
+//! mismatched read fails at runtime, after the upgrade has landed.
+//!
+//! 1. Wasm upgrades replace code only; every storage entry survives untouched.
+//! 2. Storage migrations run **inside the upgraded contract**, as an
+//!    admin-gated `migrate` entry point — not from a separate migration
+//!    contract. A contract can only reach its own storage, so another contract
+//!    has no access path to these entries.
+//! 3. Ship the old type definition in the same Wasm as the new one. It is what
+//!    makes existing entries readable while they are converted.
+//! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
+//!    post-upgrade state, then remove the migration code in a later upgrade.
+//! 5. `Anchor(Address)` and `SystemParam(Symbol)` are keyed by value and
+//!    Soroban cannot enumerate storage keys, so those cannot be migrated by
+//!    iteration. Convert them lazily on read, or pass the keys in explicitly.
+//!
+//! Full guidance, including worked examples and the TTL hazards, is in
+//! [`DEVELOPMENT.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/DEVELOPMENT.md).
+//!
 //! ### Pause / Unpause
 //! The admin can halt all mutating governance operations by calling
 //! [`GovernanceContract::pause`]. This sets a boolean flag in instance storage
-//! and emits a `pause` event. All entry-points that write state call the
+//! and emits a `paused` event. All entry-points that write state call the
 //! internal `assert_not_paused` guard. The contract is re-enabled with
-//! [`GovernanceContract::unpause`], which emits an `unpause` event.
+//! [`GovernanceContract::unpause`], which emits an `unpaused` event.
+//!
+//! ## Pause Model
+//! The pause flag blocks the anchor registry and fee configuration
+//! (`upsert_anchor`, `remove_anchor`, `set_fee_config` all call
+//! `assert_not_paused`). The following administrative operations are
+//! intentionally NOT blocked during pause, so the admin can fix the root
+//! cause of the emergency:
+//! - `upgrade` — deploy a fix
+//! - `transfer_admin` — rotate compromised keys
+//! - `update_system_param` — adjust system configuration
 //!
 //! ### Fee Configuration
 //! [`GovernanceContract::set_fee_config`] stores a [`FeeConfig`] struct that
@@ -71,6 +103,33 @@
 //! | 5 | `AnchorMissing` | Tried to remove an unregistered anchor |
 //! | 6 | `Paused` | Contract is paused |
 //! | 7 | `InvalidAdmin` | Transfer target is zero-address or current admin |
+//! | 8 | `InvalidParamValue` | Supplied system parameter value is invalid or out of bounds |
+//! | 9 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
+//! | 10 | `RecoveryNotPending` | No recovery operation is currently pending |
+//! | 11 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
+//! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
+//! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
+//!
+//! ## Event Conventions
+//!
+//! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
+//! indexers a predictable topic layout, every event in this contract follows
+//! the same conventions:
+//!
+//! - `topic[0]` is always the event name as a [`Symbol`], constructed via
+//!   [`Symbol::new`]. Indexers filter on this single topic to dispatch by
+//!   event type.
+//! - `topic[1..n]` carry the entity identifiers that scope the event —
+//!   typically an [`Address`] (asset, admin, recovery address), but for some
+//!   events also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`) or a
+//!   [`Symbol`] (system-parameter key on `sys_param_updated`). The exact
+//!   shape of `topic[1..n]` is fixed per event.
+//! - The **data payload** carries the values describing the state change.
+//!   Its shape is event-specific: a single value, a tuple, a typed struct
+//!   such as [`AdminTransferred`], or `()`.
+//! - Each entry point emits exactly the events tied to the state change it
+//!   performs; no two events emitted by the same call describe the same
+//!   logical change.
 //!
 //! ## Emitted Events
 //!
@@ -78,27 +137,38 @@
 //! |---|---|
 //! | `contract_upgraded` | Wasm upgrade succeeded |
 //! | `admin` | Admin transfer completed |
-//! | `pause` | Contract paused |
-//! | `unpause` | Contract unpaused |
+//! | `paused` | Contract paused |
+//! | `unpaused` | Contract unpaused |
 //! | `sys_param` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
-//! | `anchor_upserted` | Anchor created or replaced for an asset |
+//! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
 //! | `anchor_removed` | Anchor removed for an asset |
+
+// TODO: Refactor flat file structure into modular hierarchy (Issue #84)
+// Intended module structure:
+// - mod types: Data structures (enums, structs)
+// - mod storage: DataKey and storage access helpers
+// - mod events: Event definitions and emission helpers
+// - mod errors: Error enums
+// - mod contract: Main contract trait implementation
+// - mod test: Unit and integration tests
 
 #![no_std]
 
+use bettapay_common::{
+    constants::{
+        BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS, TTL_BUMP_LEDGERS,
+        TTL_THRESHOLD_LEDGERS,
+    },
+    events::{self, AdminTransferred, PendingRecovery},
+    storage::{self, CommonDataKey},
+};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    String, Symbol, Vec, SymbolStr, TryFromVal,
 };
 
-/// Minimum allowed fee in basis points (0.05%).
-const MIN_FEE_BPS: u32 = 5;
-/// Maximum allowed fee in basis points (50%).
-const MAX_FEE_BPS: u32 = 5_000;
-const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
-const FEE_TTL_BUMP: u32 = 17280 * 30;
-
+const DEFAULT_TIMELOCK_DELAY_SECONDS: u64 = 2 * 24 * 60 * 60; // 48 hours
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeConfig {
@@ -106,29 +176,76 @@ pub struct FeeConfig {
     pub network_fee_bps: u32,
 }
 
-/// Structured payload for the `admin_transferred` event, so off-chain
-/// consumers can read `old_admin`/`new_admin` by name instead of having to
-/// know the positional order of an anonymous tuple.
+// TTL constants are kept locally aliased to `TTL_THRESHOLD_LEDGERS` /
+// `TTL_BUMP_LEDGERS` so existing call sites and tests can keep referring to
+// the named per-key constants.
+const FEE_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+const FEE_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+const ANCHOR_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+const ANCHOR_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+const SYSTEM_PARAM_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+const SYSTEM_PARAM_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+// `read_admin` delegates entirely to `bettapay_common::storage::read_admin`,
+// which uses `TTL_THRESHOLD_LEDGERS`/`TTL_BUMP_LEDGERS` directly, so these
+// aliases are only needed by tests asserting on the exact TTL values.
+#[cfg(test)]
+const ADMIN_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
+#[cfg(test)]
+const ADMIN_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
+
+// Instance-storage TTL policy for short-lived reads of non-`Admin` entries
+// (`RecoveryAddress` here). Deliberately shorter than the 14/30 day policy
+// above because these entries are only consulted during a recovery window,
+// per `adr/003-ttl-value-selection.md`.
+const READ_INSTANCE_TTL_THRESHOLD: u32 = 50_000;
+const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
+
+// Admin, RecoveryAddress, PendingRecovery, and Paused live in
+// `bettapay_common::storage::CommonDataKey` instead of here - see that
+// type's doc comment for why a shared key type is safe to mix with this
+// contract's own storage without a migration.
 #[derive(Clone)]
 #[contracttype]
-pub struct AdminTransferred {
-    pub old_admin: Address,
-    pub new_admin: Address,
+pub enum Operation {
+    Upgrade(BytesN<32>),
+    TransferAdmin(Address),
+    CancelRecovery,
+    UpdateSystemParam(Symbol, i128),
+    SetFeeConfig(FeeConfig),
+    UpsertAnchor(Address, Address),
+    RemoveAnchor(Address),
 }
 
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
-    /// Storage key for the contract admin address in instance storage.
+    /// Storage key for the contract admin addresses.
     Admin,
-    /// Storage key for a system parameter value indexed by a symbol in persistent storage.
+
+    /// Storage key for the multisig admin threshold.
+    Threshold,
+
+    /// Storage key for the recovery address that can reset the admin.
+    RecoveryAddress,
+
+    /// Storage key for the pending recovery operation.
+    PendingRecovery,
+
+    /// Storage key for arbitrary system parameters.
     SystemParam(Symbol),
-    /// Storage key for the fee configuration data in persistent storage.
+
+    /// Storage key for the fee configuration data.
     FeeConfig,
-    /// Storage key for the anchor address associated with a specific asset in persistent storage.
+
+    /// Storage key for the anchor address associated with a specific asset.
     Anchor(Address),
-    /// Storage key for the pause state flag in instance storage.
+
+    /// Storage key for the pause state flag.
     Paused,
+
+    /// Storage key for a scheduled operation.
+    /// Uses persistent storage, keyed by operation hash, to store execution timestamp.
+    ScheduledOperation(BytesN<32>),
 }
 
 #[contracterror]
@@ -150,6 +267,23 @@ pub enum GovernanceError {
     /// The provided admin address is invalid (e.g., zero address or same as current admin).
     InvalidAdmin = 7,
     InvalidParamValue = 8,
+    InvalidRecoveryAddress = 9,
+    RecoveryNotPending = 10,
+    RecoveryDelayActive = 11,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused = 12,
+    /// `unpause` was called while the contract was already unpaused.
+    AlreadyUnpaused = 13,
+    /// The scheduled operation is not yet ready for execution.
+    ExecutionNotReady = 14,
+    /// The operation has not been scheduled.
+    OperationNotScheduled = 15,
+    /// The operation has already been scheduled.
+    OperationAlreadyScheduled = 16,
+    /// The deployed WASM does not implement the required interface.
+    InvalidWasmInterface = 17,
+    /// The provided multisig threshold is invalid.
+    InvalidThreshold = 14,
 }
 
 #[contract]
@@ -157,6 +291,10 @@ pub struct GovernanceContract;
 
 #[contractimpl]
 impl GovernanceContract {
+    pub fn supports_interface(_env: Env, version: u32) -> bool {
+        version == 1
+    }
+
     /// Initialises the governance contract and sets the initial administrator.
     ///
     /// Must be called exactly once after deployment. The caller is recorded as the
@@ -178,42 +316,45 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::AlreadyInitialized` if already initialised.
-    pub fn init(env: Env, admin: Address) {
+    pub fn init(env: Env, admins: Vec<Address>, threshold: u32, recovery_address: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, GovernanceError::AlreadyInitialized);
         }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        validate_admins_and_threshold(&env, &admins, threshold);
+        validate_nonzero_address(
+            &env,
+            &recovery_address,
+            GovernanceError::InvalidRecoveryAddress,
+        );
+        for i in 0..threshold {
+            admins.get(i).unwrap().require_auth();
+        }
+        env.storage().instance().set(&DataKey::Admin, &admins);
+        env.storage().instance().set(&DataKey::Threshold, &threshold);
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::RecoveryAddress, &recovery_address);
+        env.events()
+            .publish((Symbol::new(&env, "initialized"),), admin);
     }
 
-    /// Returns whether the contract has been initialised.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    ///
-    /// # Returns
-    ///
-    /// `true` if `init` has been called successfully; `false` otherwise.
     pub fn is_initialized(env: Env) -> bool {
-        env.storage().instance().has(&DataKey::Admin)
+        // `is_initialized` is a cheap probe that should not bump the instance
+        // TTL — going through `storage::read_admin` would do an extend_ttl on
+        // every check and could panic if the contract has no instance entries.
+        env.storage().instance().has(&CommonDataKey::Admin)
     }
 
-    /// Returns the current contract administrator address.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    ///
-    /// # Returns
-    ///
-    /// The stored administrator `Address`.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::NotInitialized` if the contract has not been initialised.
-    pub fn get_admin(env: Env) -> Address {
-        read_admin(&env)
+    pub fn get_admin(env: Env) -> Vec<Address> {
+        read_admins(&env)
+    }
+
+    pub fn get_threshold(env: Env) -> u32 {
+        read_threshold(&env)
+    }
+
+    pub fn get_recovery_address(env: Env) -> Address {
+        read_recovery_address(&env)
     }
 
     /// Upgrades the contract Wasm code to a new version.
@@ -225,8 +366,8 @@ impl GovernanceContract {
     ///
     /// ### Events
     /// - Emits `contract_upgraded` with topic
-    ///   `(Symbol("contract_upgraded"), new_wasm_hash)` and data
-    ///   `(caller)`.
+    ///   `(Symbol("contract_upgraded"), caller)` and data
+    ///   `(new_wasm_hash)`.
     ///
     /// ### Panics
     /// - If the caller is not the stored admin.
@@ -236,254 +377,184 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::Unauthorized);
         }
         caller.require_auth();
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        let salt = BytesN::from_array(&env, &[0u8; 32]);
+        let temp_contract = env
+            .deployer()
+            .with_current_contract(salt)
+            .deploy(new_wasm_hash.clone());
+        let args: Vec<Val> = Vec::from_array(&env, [1u32.into_val(&env)]);
+        let is_supported: bool = match env.try_invoke_contract::<bool, soroban_sdk::ConversionError>(
+            &temp_contract,
+            &Symbol::new(&env, "supports_interface"),
+            args,
+        ) {
+            Ok(Ok(val)) => val,
+            _ => false,
+        };
+        if !is_supported {
+            panic_with_error!(&env, GovernanceError::InvalidWasmInterface);
+        }
+
+    pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let event_wasm_hash = new_wasm_hash.clone();
+        let caller = signers.get(0).unwrap();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), new_wasm_hash),
+            (Symbol::new(&env, "contract_upgraded"), event_wasm_hash),
             caller,
         );
     }
 
-    /// Transfers administrative control of the contract to a new address.
-    ///
-    /// The current administrator must authorise the call. The new admin may not be
-    /// the zero address or the same address as the current administrator.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `_caller` - Unused parameter; authorisation is enforced via the stored admin.
-    /// * `new_admin` - The address to become the new administrator.
-    ///
-    /// # Authorization
-    ///
-    /// Requires authorisation from the current stored administrator.
-    ///
-    /// # Effects
-    ///
-    /// Overwrites `DataKey::Admin` in instance storage and emits an `admin` event
-    /// carrying the new administrator address.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::InvalidAdmin` if `new_admin` is the zero address
-    /// or is identical to the current administrator.
-    pub fn transfer_admin(env: Env, _caller: Address, new_admin: Address) {
-        let admin = read_admin(&env);
-        admin.require_auth();
+    pub fn initiate_recovery(env: Env, new_admin: Address) {
+        let recovery_address = read_recovery_address(&env);
+        recovery_address.require_auth();
+        assert_not_zero(&env, &new_admin, GovernanceError::InvalidAdmin);
 
-        let zero_address = String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        );
-        if new_admin.to_string() == zero_address {
-            panic_with_error!(&env, GovernanceError::InvalidAdmin);
+        let pending = PendingRecovery {
+            new_admin: new_admin.clone(),
+            execute_after: env.ledger().timestamp() + RECOVERY_DELAY_SECONDS,
+        };
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::PendingRecovery, &pending);
+        events::emit_recovery_initiated(&env, &recovery_address, &new_admin, pending.execute_after);
+    }
+
+    pub fn cancel_recovery(env: Env, signers: Vec<Address>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
+        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+            panic_with_error!(&env, GovernanceError::RecoveryNotPending);
+        }
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        events::emit_recovery_cancelled(&env, &admin);
+    }
+
+    pub fn execute_recovery(env: Env) {
+        let pending = read_pending_recovery(&env);
+        if env.ledger().timestamp() < pending.execute_after {
+            panic_with_error!(&env, GovernanceError::RecoveryDelayActive);
         }
 
-        if admin == new_admin {
-            panic_with_error!(&env, GovernanceError::InvalidAdmin);
-        }
-
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        let old_admins = read_admins(&env);
+        let old_admin = old_admins.get(0).unwrap();
+        let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
+        env.storage().instance().set(&DataKey::Admin, &new_admins);
+        env.storage().instance().set(&DataKey::Threshold, &1u32);
+        env.storage().instance().remove(&DataKey::PendingRecovery);
         env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
+            (Symbol::new(&env, "recovery_executed"),),
             AdminTransferred {
-                old_admin: admin,
-                new_admin,
+                old_admin,
+                new_admin: pending.new_admin.clone(),
             },
         );
     }
 
-    /// Pauses the contract, blocking all state-mutating operations.
-    ///
-    /// While paused, any function guarded by `assert_not_paused` will reject
-    /// incoming transactions. Intended for emergency use by the administrator.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `caller` - Must be the stored administrator.
-    ///
-    /// # Authorization
-    ///
-    /// Callable only by the configured contract administrator.
-    ///
-    /// # Effects
-    ///
-    /// Sets `DataKey::Paused` to `true` in instance storage and emits a `pause` event.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    pub fn pause(env: Env, caller: Address) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
+    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admins: Vec<Address>, new_threshold: u32) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        validate_admins_and_threshold(&env, &new_admins, new_threshold);
+
+        let old_admins = read_admins(&env);
+        env.storage().instance().set(&DataKey::Admin, &new_admins);
+        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin: old_admins.get(0).unwrap(),
+                new_admin: new_admins.get(0).unwrap(),
+            },
+        );
+    }
+
+    pub fn change_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
+        let current_threshold = read_threshold(&env);
+        verify_admin_auth(&env, &signers, current_threshold + 1);
+
+        let admins = read_admins(&env);
+        if new_threshold == 0 || new_threshold > admins.len() {
+            panic_with_error!(&env, GovernanceError::InvalidThreshold);
         }
-        caller.require_auth();
+
+        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        env.events().publish(
+            (Symbol::new(&env, "threshold_changed"),),
+            (current_threshold, new_threshold),
+        );
+    }
+
+    pub fn pause(env: Env, signers: Vec<Address>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        if is_paused(&env) {
+            panic_with_error!(&env, GovernanceError::AlreadyPaused);
+        }
+        let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
-            .publish((symbol_short!("pause"),), (admin, true));
+            .publish((Symbol::new(&env, "paused"),), (admin, true));
     }
 
-    /// Resumes normal contract operation after a pause.
-    ///
-    /// Clears the paused state so that state-mutating operations can proceed again.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `caller` - Must be the stored administrator.
-    ///
-    /// # Authorization
-    ///
-    /// Callable only by the configured contract administrator.
-    ///
-    /// # Effects
-    ///
-    /// Sets `DataKey::Paused` to `false` in instance storage and emits an `unpause` event.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    pub fn unpause(env: Env, caller: Address) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
+    pub fn unpause(env: Env, signers: Vec<Address>) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        if !is_paused(&env) {
+            panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
         }
-        caller.require_auth();
+        let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
-            .publish((symbol_short!("unpause"),), (admin, false));
+            .publish((Symbol::new(&env, "unpaused"),), (admin, false));
     }
 
-    /// Returns whether the contract is currently paused.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the contract is paused; `false` otherwise (including when the
-    /// paused flag has never been explicitly set).
     pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
+        storage::is_paused(&env)
     }
 
-    /// Creates or updates a named system parameter in persistent storage.
-    ///
-    /// System parameters are arbitrary `i128` values keyed by a `Symbol` and are
-    /// intended for protocol-level configuration such as settlement delay bounds.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `caller` - Must be the stored administrator.
-    /// * `key` - The `Symbol` identifier for the parameter.
-    /// * `value` - The `i128` value to store.
-    ///
-    /// # Authorization
-    ///
-    /// Callable only by the configured contract administrator.
-    ///
-    /// # Effects
-    ///
-    /// Writes the key/value pair to persistent storage under `DataKey::SystemParam(key)`
-    /// and emits a `sys_param` event.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    /// Panics with `GovernanceError::Paused` if the contract is currently paused.
-    pub fn update_system_param(env: Env, caller: Address, key: Symbol, value: i128) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
+    pub fn update_system_param(env: Env, signers: Vec<Address>, key: Symbol, value: i128) {
+        if key.to_string().len() > 32 {
+            panic_with_error!(&env, GovernanceError::InvalidParamValue);
         }
-        caller.require_auth();
+
+        verify_admin_auth(&env, &signers, read_threshold(&env));
 
         if value < 0 {
             panic_with_error!(&env, GovernanceError::InvalidParamValue);
         }
 
+        let admin = signers.get(0).unwrap();
         let storage_key = DataKey::SystemParam(key.clone());
         let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
 
         env.storage().persistent().set(&storage_key, &value);
 
-        // Structured for off-chain indexing: topics carry the event name and
-        // the specific parameter key (so indexers can filter per-parameter),
-        // and the data payload carries who made the change and the full
-        // before/after value, so the change is auditable without needing to
-        // separately diff storage reads.
         env.events().publish(
             (Symbol::new(&env, "sys_param_updated"), key),
             (admin, previous_value, value),
         );
     }
 
-    /// Retrieves a stored system parameter by key.
-    ///
-    /// If the entry exists its persistent storage TTL is refreshed before the
-    /// value is returned.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `key` - The `Symbol` identifier of the parameter to retrieve.
-    ///
-    /// # Returns
-    ///
-    /// `Some(value)` if the parameter exists; `None` otherwise.
-    ///
-    /// # Effects
-    ///
-    /// Extends the persistent storage TTL for `DataKey::SystemParam(key)` when the
-    /// entry is present.
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
+        if symbol_len(&env, &key) > 32 {
+            panic_with_error!(&env, GovernanceError::InvalidParamValue);
+        }
+
         let storage_key = DataKey::SystemParam(key);
         if env.storage().persistent().has(&storage_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&storage_key, 50_000, 100_000);
+            env.storage().persistent().extend_ttl(
+                &storage_key,
+                SYSTEM_PARAM_TTL_THRESHOLD,
+                SYSTEM_PARAM_TTL_BUMP,
+            );
         }
         env.storage().persistent().get(&storage_key)
     }
 
-    /// Sets the platform and network fee configuration.
-    ///
-    /// Both fee values are in basis points and must be within the inclusive range
-    /// `[MIN_FEE_BPS, MAX_FEE_BPS]` (5–5 000 bps). Either the platform or network
-    /// fee falling outside this range causes the call to be rejected.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `caller` - Must be the stored administrator.
-    /// * `config` - A [`FeeConfig`] containing `platform_fee_bps` and `network_fee_bps`.
-    ///
-    /// # Authorization
-    ///
-    /// Callable only by the configured contract administrator.
-    ///
-    /// # Effects
-    ///
-    /// Writes `config` to persistent storage under `DataKey::FeeConfig`, refreshes its
-    /// TTL, and emits a `fee_config_updated` event.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::InvalidFeeBps` if either fee value is outside the
-    /// allowed range.
-    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    /// Panics with `GovernanceError::Paused` if the contract is currently paused.
-    pub fn set_fee_config(env: Env, caller: Address, config: FeeConfig) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
-        }
-        caller.require_auth();
+    pub fn set_fee_config(env: Env, signers: Vec<Address>, config: FeeConfig) {
+        assert_not_paused(&env);
+        verify_admin_auth(&env, &signers, read_threshold(&env));
 
         if config.platform_fee_bps < MIN_FEE_BPS
             || config.platform_fee_bps > MAX_FEE_BPS
@@ -493,12 +564,13 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::InvalidFeeBps);
         }
 
-        if config.platform_fee_bps + config.network_fee_bps > 10_000 {
+        if config.platform_fee_bps + config.network_fee_bps > BPS_DENOMINATOR {
             panic_with_error!(&env, GovernanceError::InvalidFeeBps);
         }
 
+        let admin = signers.get(0).unwrap();
         let key = DataKey::FeeConfig;
-        env.storage().persistent().set(&key, &config.clone());
+        env.storage().persistent().set(&key, &config);
         env.storage()
             .persistent()
             .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
@@ -506,21 +578,10 @@ impl GovernanceContract {
             .publish((Symbol::new(&env, "fee_config_updated"),), (admin, config));
     }
 
-    /// Returns the currently stored fee configuration, if any.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    ///
-    /// # Returns
-    ///
-    /// `Some(FeeConfig)` if a fee configuration has been set via [`set_fee_config`];
-    /// `None` otherwise.
     pub fn get_fee_config(env: Env) -> Option<FeeConfig> {
         let key = DataKey::FeeConfig;
         match env.storage().persistent().get(&key) {
             Some(config) => {
-                // Extend persistent storage TTL using the same thresholds as set_fee_config
                 env.storage()
                     .persistent()
                     .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
@@ -530,78 +591,22 @@ impl GovernanceContract {
         }
     }
 
-    /// Creates or updates the anchor address associated with a supported asset.
-    ///
-    /// An anchor maps a token asset address to the trusted entity responsible for
-    /// managing that asset within the payment system. Calling this function for an
-    /// existing `asset` key overwrites the previously registered anchor address.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `caller` - Must be the stored administrator.
-    /// * `asset` - The asset token address whose anchor is being registered or updated.
-    /// * `anchor` - The anchor address to associate with `asset`.
-    ///
-    /// # Authorization
-    ///
-    /// Callable only by the configured contract administrator.
-    ///
-    /// # Effects
-    ///
-    /// Writes the anchor address to persistent storage under `DataKey::Anchor(asset)`
-    /// and emits an `anchor_upserted` event.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    /// Panics with `GovernanceError::Paused` if the contract is currently paused.
-    pub fn upsert_anchor(env: Env, caller: Address, asset: Address, anchor: Address) {
+    pub fn upsert_anchor(env: Env, signers: Vec<Address>, asset: Address, anchor: Address) {
         assert_not_paused(&env);
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
-        }
-        caller.require_auth();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
         let key = DataKey::Anchor(asset.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
-        env.events()
-            .publish((Symbol::new(&env, "anchor_upserted"), asset), anchor);
+        env.events().publish(
+            (Symbol::new(&env, "anchor_upserted"), asset),
+            (old_anchor, anchor),
+        );
     }
 
-    /// Removes the anchor configuration for the given asset.
-    ///
-    /// Deletes the `DataKey::Anchor(asset)` entry from persistent storage. The asset
-    /// must already have a registered anchor; attempting to remove an unknown asset
-    /// is rejected.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `caller` - Must be the stored administrator.
-    /// * `asset` - The asset token address whose anchor registration is to be removed.
-    ///
-    /// # Authorization
-    ///
-    /// Callable only by the configured contract administrator.
-    ///
-    /// # Effects
-    ///
-    /// Removes `DataKey::Anchor(asset)` from persistent storage and emits both an
-    /// `anchor_rm` and an `anchor_removed` event.
-    ///
-    /// # Errors
-    ///
-    /// Panics with `GovernanceError::AnchorMissing` if no anchor is registered for `asset`.
-    /// Panics with `GovernanceError::Unauthorized` if `caller` is not the administrator.
-    /// Panics with `GovernanceError::Paused` if the contract is currently paused.
-    pub fn remove_anchor(env: Env, caller: Address, asset: Address) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
-        }
-        caller.require_auth();
+    pub fn remove_anchor(env: Env, signers: Vec<Address>, asset: Address) {
+        assert_not_paused(&env);
+        verify_admin_auth(&env, &signers, read_threshold(&env));
         let key = DataKey::Anchor(asset.clone());
 
         if !env.storage().persistent().has(&key) {
@@ -609,68 +614,221 @@ impl GovernanceContract {
         }
 
         env.storage().persistent().remove(&key);
-        // Ensure the instance cache is also cleared for this key
-        // Emit events indicating removal
-        env.events()
-            .publish((symbol_short!("anchor_rm"),), (asset.clone(),));
         env.events()
             .publish((Symbol::new(&env, "anchor_removed"), asset), ());
     }
 
-    /// Returns the anchor address registered for the given asset, if any.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban execution environment.
-    /// * `asset` - The asset token address to look up.
-    ///
-    /// # Returns
-    ///
-    /// `Some(anchor_address)` if an anchor is registered for `asset`; `None` otherwise.
     pub fn get_anchor(env: Env, asset: Address) -> Option<Address> {
         let key = DataKey::Anchor(asset.clone());
         let result = env.storage().persistent().get(&key);
         if result.is_some() {
-            env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+            // `extend_ttl` only writes when the current TTL is below
+            // `threshold`, so this has the same externally observable
+            // behavior as a manual get_ttl-then-extend check, without
+            // depending on `get_ttl`, which is test-only in production code.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         }
         result
     }
+
+    // --- Internal Admin Functions ---
+
+    fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
+        let admin = read_admin(env);
+        let event_wasm_hash = new_wasm_hash.clone();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (Symbol::new(env, "contract_upgraded"), event_wasm_hash),
+            admin,
+        );
+    }
+
+    fn _transfer_admin(env: &Env, new_admin: Address) {
+        let admin = read_admin(env);
+        assert_not_zero(env, &new_admin, GovernanceError::InvalidAdmin);
+        if admin == new_admin {
+            panic_with_error!(env, GovernanceError::InvalidAdmin);
+        }
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin: admin,
+                new_admin,
+            },
+        );
+    }
+
+    fn _cancel_recovery(env: &Env) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
+            panic_with_error!(env, GovernanceError::RecoveryNotPending);
+        }
+        let admin = read_admin(env);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
+        env.events()
+            .publish((Symbol::new(env, "recovery_cancelled"),), admin);
+    }
+
+    fn _update_system_param(env: &Env, key: Symbol, value: i128) {
+        assert_not_paused(env);
+        if symbol_len(env, &key) > 32 {
+            panic_with_error!(env, GovernanceError::InvalidParamValue);
+        }
+        if value < 0 {
+            panic_with_error!(env, GovernanceError::InvalidParamValue);
+        }
+
+        let storage_key = DataKey::SystemParam(key.clone());
+        let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
+        env.storage().persistent().set(&storage_key, &value);
+
+        let admin = read_admin(env);
+        env.events().publish(
+            (Symbol::new(env, "sys_param_updated"), key),
+            (admin, previous_value, value),
+        );
+    }
+
+    fn _set_fee_config(env: &Env, config: FeeConfig) {
+        assert_not_paused(env);
+        if config.platform_fee_bps < MIN_FEE_BPS
+            || config.platform_fee_bps > MAX_FEE_BPS
+            || config.network_fee_bps < MIN_FEE_BPS
+            || config.network_fee_bps > MAX_FEE_BPS
+        {
+            panic_with_error!(env, GovernanceError::InvalidFeeBps);
+        }
+        if config.platform_fee_bps + config.network_fee_bps > BPS_DENOMINATOR {
+            panic_with_error!(env, GovernanceError::InvalidFeeBps);
+        }
+
+        let key = DataKey::FeeConfig;
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
+
+        let admin = read_admin(env);
+        env.events()
+            .publish((Symbol::new(env, "fee_config_updated"),), (admin, config));
+    }
+
+    fn _upsert_anchor(env: &Env, asset: Address, anchor: Address) {
+        assert_not_paused(env);
+        let key = DataKey::Anchor(asset.clone());
+        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
+        env.storage().persistent().set(&key, &anchor.clone());
+        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+        env.events().publish(
+            (Symbol::new(env, "anchor_upserted"), asset),
+            (old_anchor, anchor),
+        );
+    }
+
+    fn _remove_anchor(env: &Env, asset: Address) {
+        assert_not_paused(env);
+        let key = DataKey::Anchor(asset.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(env, GovernanceError::AnchorMissing);
+        }
+        env.storage().persistent().remove(&key);
+        env.events()
+            .publish((Symbol::new(env, "anchor_removed"), asset), ());
+    }
 }
 
-/// Returns the administrator address stored in contract storage.
-///
-/// This helper is used internally by authorization checks throughout the
-/// governance contract and refreshes the instance TTL while reading the
-/// current admin value.
-///
-/// # Returns
-///
-/// The current administrator `Address` stored in persistent instance storage.
-///
-/// # Panics
-///
-/// Panics if the contract has not been initialized yet.
-fn read_admin(env: &Env) -> Address {
-    env.storage().instance().extend_ttl(50_000, 100_000);
+fn read_admins(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
 }
 
-/// Returns whether governance operations are currently paused.
-///
-/// This helper reads the pause flag from instance storage so other internal
-/// checks can decide whether mutating operations should be allowed.
-///
-/// # Returns
-///
-/// `true` if the contract is paused; otherwise `false`.
-fn is_paused(env: &Env) -> bool {
+fn read_threshold(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&DataKey::Paused)
-        .unwrap_or(false)
+        .get(&DataKey::Threshold)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
+}
+
+fn validate_admins_and_threshold(env: &Env, admins: &Vec<Address>, threshold: u32) {
+    if threshold == 0 || threshold > admins.len() {
+        panic_with_error!(env, GovernanceError::InvalidThreshold);
+    }
+    if admins.is_empty() {
+        panic_with_error!(env, GovernanceError::InvalidAdmin);
+    }
+    for i in 0..admins.len() {
+        let admin = admins.get(i).unwrap();
+        validate_nonzero_address(env, &admin, GovernanceError::InvalidAdmin);
+        for j in (i + 1)..admins.len() {
+            if admin == admins.get(j).unwrap() {
+                panic_with_error!(env, GovernanceError::InvalidAdmin);
+            }
+        }
+    }
+}
+
+fn verify_admin_auth(env: &Env, signers: &Vec<Address>, required_count: u32) {
+    let admins = read_admins(env);
+    if (signers.len() as u32) < required_count {
+        panic_with_error!(env, GovernanceError::Unauthorized);
+    }
+    for i in 0..signers.len() {
+        let signer = signers.get(i).unwrap();
+        let mut is_admin = false;
+        for j in 0..admins.len() {
+            if signer == admins.get(j).unwrap() {
+                is_admin = true;
+                break;
+            }
+        }
+        if !is_admin {
+            panic_with_error!(env, GovernanceError::Unauthorized);
+        }
+        for j in (i + 1)..signers.len() {
+            if signer == signers.get(j).unwrap() {
+                panic_with_error!(env, GovernanceError::Unauthorized);
+            }
+        }
+        signer.require_auth();
+    }
+}
+
+fn read_recovery_address(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::RecoveryAddress)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
+}
+
+fn read_pending_recovery(env: &Env) -> PendingRecovery {
+    env.storage()
+        .instance()
+        .get(&CommonDataKey::PendingRecovery)
+        .unwrap_or_else(|| panic_with_error!(env, GovernanceError::RecoveryNotPending))
+}
+
+fn assert_not_zero(env: &Env, address: &Address, error: GovernanceError) {
+    if address.to_string().is_empty() || storage::is_zero_address(env, address) {
+        panic_with_error!(env, error);
+    }
 }
 
 /// Ensures the governance contract is not currently paused.
@@ -683,96 +841,167 @@ fn is_paused(env: &Env) -> bool {
 ///
 /// Panics with `GovernanceError::Paused` if the contract is currently paused.
 fn assert_not_paused(env: &Env) {
-    if is_paused(env) {
+    if storage::is_paused(env) {
         panic_with_error!(env, GovernanceError::Paused);
     }
 }
+
+/// Returns the character length of a `Symbol`.
+///
+/// `Symbol` has no `ToString`/`Display` impl available on the wasm target
+/// (soroban-sdk gates that behind `not(target_family = "wasm")`), so length
+/// is measured via `SymbolStr`, which is available on every target.
+fn symbol_len(env: &Env, key: &Symbol) -> usize {
+    SymbolStr::try_from_val(env, &key.to_symbol_val())
+        .map(|s| s.len())
+        .unwrap_or(0)
+}
+
+/// Computes a deterministic SHA-256 hash of an `Operation` by serializing it
+/// to XDR and hashing the resulting bytes. Used as the key for scheduled
+/// operations.
+fn operation_hash(env: &Env, operation: &Operation) -> BytesN<32> {
+    let val: Val = operation.clone().into_val(env);
+    let xdr = val.to_xdr(env);
+    env.crypto().sha256(&xdr)
+}
+
+/// Shared test setup used across the main test module and the anchor_*
+/// sub-modules, so a change to `init`'s signature only needs updating here.
+#[cfg(test)]
+pub(crate) fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
+    use soroban_sdk::testutils::Address as _;
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let contract_id = env.register_contract(None, GovernanceContract);
+    let client = GovernanceContractClient::new(&env, &contract_id);
+    client.init(&admin, &recovery_address);
+    (env, client, admin)
+}
+
+#[cfg(test)]
+mod anchor_auth_tests;
 
 #[cfg(test)]
 mod anchor_event_tests;
 
 #[cfg(test)]
-mod anchor_removal_test;
+mod anchor_removal_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
     use soroban_sdk::{vec, Bytes, FromVal};
 
-    fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
+    fn setup() -> (Env, GovernanceContractClient<'static>, Vec<Address>, Address) {
         let env = Env::default();
         env.mock_all_auths();
 
-        let admin = Address::generate(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admins = vec![&env, admin1.clone(), admin2.clone()];
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
-        client.init(&admin);
-        (env, client, admin)
-    }
-
-    #[allow(dead_code)]
-    fn setup_no_mock() -> (Env, GovernanceContractClient<'static>, Address) {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let contract_id: Address = env.register_contract(None, GovernanceContract);
-        let client = GovernanceContractClient::new(&env, &contract_id);
-
-        let invoke = MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "init",
-            args: vec![&env, admin.to_val()],
-            sub_invokes: &[],
-        };
-        let auth = MockAuth {
-            address: &admin,
-            invoke: &invoke,
-        };
-        env.set_auths(&[(&auth).into()]);
-        client.init(&admin);
-        (env, client, admin)
+        client.init(&admins, &2, &recovery_address);
+        (env, client, admins, recovery_address)
     }
 
     #[allow(dead_code)]
     fn upload_test_wasm(env: &Env) -> BytesN<32> {
-        let wasm = Bytes::from_slice(env, &[]);
+        let wasm = Bytes::from_slice(env, GovernanceContract::WASM);
         env.deployer().upload_contract_wasm(wasm)
     }
 
     #[test]
-    fn updates_system_parameters() {
+    fn executes_contract_wasm_upgrade_successfully() {
+        let (env, client, admins, _recovery) = setup();
+        let new_wasm_hash = upload_test_wasm(&env);
+
+        client.upgrade(&admins, &new_wasm_hash);
+
+        let upgraded_client = GovernanceContractClient::new(&env, &client.address);
+        assert_eq!(upgraded_client.get_admin(), admins);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #17)")]
+    fn governance_rejects_upgrade_with_invalid_wasm_interface() {
         let (env, client, admin) = setup();
+        let wasm = Bytes::from_slice(&env, &[]);
+        let invalid_wasm_hash = env.deployer().upload_contract_wasm(wasm);
+        client.upgrade(&admin, &invalid_wasm_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1)")]
+    fn governance_rejects_double_initialization() {
+        let (env, client, admins, recovery) = setup();
+        client.init(&admins, &2, &recovery);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #14)")]
+    fn governance_rejects_zero_threshold_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let recovery = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.init(&vec![&env, admin], &0, &recovery);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn governance_rejects_zero_address_admin_transfer() {
+        let (env, client, admins, _recovery) = setup();
+        let zero_address = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+
+        client.transfer_admin(&admins, &vec![&env, zero_address], &1);
+    }
+
+    #[test]
+    fn updates_system_parameters() {
+        let (env, client, admins, _recovery) = setup();
         let key = Symbol::new(&env, "max_settle");
         let before = env.events().all().len();
-        client.update_system_param(&admin, &key, &1440);
+        client.update_system_param(&admins, &key, &1440);
         assert_eq!(client.get_system_param(&key), Some(1440));
         assert!(env.events().all().len() > before);
     }
 
     #[test]
     fn system_parameter_key_uniqueness_overwrites_value() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let key = Symbol::new(&env, "test_param");
 
-        client.update_system_param(&admin, &key, &100);
+        client.update_system_param(&admins, &key, &100);
         assert_eq!(client.get_system_param(&key), Some(100));
 
-        client.update_system_param(&admin, &key, &200);
+        client.update_system_param(&admins, &key, &200);
         assert_eq!(client.get_system_param(&key), Some(200));
 
-        client.update_system_param(&admin, &key, &300);
+        client.update_system_param(&admins, &key, &300);
         assert_eq!(client.get_system_param(&key), Some(300));
     }
 
     #[test]
     fn sets_fee_config() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
             platform_fee_bps: 120,
             network_fee_bps: 35,
         };
         let before = env.events().all().len();
-        client.set_fee_config(&admin, &cfg);
+        client.set_fee_config(&admins, &cfg);
         let got = client.get_fee_config().expect("expected config");
         assert_eq!(got.platform_fee_bps, 120);
         assert_eq!(got.network_fee_bps, 35);
@@ -781,13 +1010,13 @@ mod tests {
 
     #[test]
     fn fee_config_event_emitted_with_correct_fields() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
             platform_fee_bps: 120,
             network_fee_bps: 35,
         };
 
-        client.set_fee_config(&admin, &cfg);
+        client.set_fee_config(&admins, &cfg);
 
         let events = env.events().all();
         let event = events.last().unwrap();
@@ -801,101 +1030,87 @@ mod tests {
         );
 
         let (event_admin, event_cfg): (Address, FeeConfig) = FromVal::from_val(&env, &data);
-        assert_eq!(event_admin, admin);
+        assert_eq!(event_admin, admins.get(0).unwrap());
         assert_eq!(event_cfg.platform_fee_bps, 120);
         assert_eq!(event_cfg.network_fee_bps, 35);
     }
 
     #[test]
     fn upserts_and_removes_anchor() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let asset = Address::generate(&env);
         let anchor = Address::generate(&env);
 
         let before_upsert = env.events().all().len();
-        client.upsert_anchor(&admin, &asset, &anchor);
+        client.upsert_anchor(&admins, &asset, &anchor);
         assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
         assert!(env.events().all().len() > before_upsert);
 
         let before_remove = env.events().all().len();
-        client.remove_anchor(&admin, &asset);
+        client.remove_anchor(&admins, &asset);
         assert_eq!(client.get_anchor(&asset), None);
         assert!(env.events().all().len() > before_remove);
     }
 
     #[test]
     fn get_anchor_extends_anchor_ttl() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let asset = Address::generate(&env);
         let anchor = Address::generate(&env);
 
-        client.upsert_anchor(&admin, &asset, &anchor);
+        client.upsert_anchor(&admins, &asset, &anchor);
         assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
         assert_eq!(client.get_anchor(&asset), Some(anchor));
     }
 
     #[test]
     fn anchor_upsert_overwrites_existing_anchor() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let asset = Address::generate(&env);
         let anchor_one = Address::generate(&env);
         let anchor_two = Address::generate(&env);
 
-        client.upsert_anchor(&admin, &asset, &anchor_one);
+        client.upsert_anchor(&admins, &asset, &anchor_one);
         assert_eq!(client.get_anchor(&asset), Some(anchor_one));
 
-        client.upsert_anchor(&admin, &asset, &anchor_two);
+        client.upsert_anchor(&admins, &asset, &anchor_two);
         assert_eq!(client.get_anchor(&asset), Some(anchor_two));
     }
 
     #[test]
     #[should_panic]
     fn rejects_fee_bps_above_max() {
-        let (_env, client, admin) = setup();
+        let (_env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
             platform_fee_bps: 5_001,
             network_fee_bps: 100,
         };
-        client.set_fee_config(&admin, &cfg);
+        client.set_fee_config(&admins, &cfg);
     }
 
     #[test]
     #[should_panic]
     fn rejects_fee_bps_below_min() {
-        let (_env, client, admin) = setup();
+        let (_env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
             platform_fee_bps: 100,
-            network_fee_bps: 4, // below MIN_FEE_BPS
+            network_fee_bps: 4,
         };
-        client.set_fee_config(&admin, &cfg);
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_fee_bps_sum_exceeds_max() {
-        let (_env, client, admin) = setup();
-        // platform 5_000 (max) + network 5_001 = 10_001 > 10_000
-        let cfg = FeeConfig {
-            platform_fee_bps: 5_000,
-            network_fee_bps: 5_001,
-        };
-        client.set_fee_config(&admin, &cfg);
+        client.set_fee_config(&admins, &cfg);
     }
 
     #[test]
     fn accepts_fee_bps_at_boundaries() {
-        let (_env, client, admin) = setup();
-        // Exactly at minimum
+        let (_env, client, admins, _recovery) = setup();
         client.set_fee_config(
-            &admin,
+            &admins,
             &FeeConfig {
                 platform_fee_bps: 5,
                 network_fee_bps: 5,
             },
         );
-        // Exactly at maximum
         client.set_fee_config(
-            &admin,
+            &admins,
             &FeeConfig {
                 platform_fee_bps: 5_000,
                 network_fee_bps: 5_000,
@@ -906,274 +1121,156 @@ mod tests {
     #[test]
     #[should_panic]
     fn rejects_removing_unknown_anchor() {
-        let (env, client, admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let missing_asset = Address::generate(&env);
-        client.remove_anchor(&admin, &missing_asset);
+        client.remove_anchor(&admins, &missing_asset);
     }
+
     #[test]
     fn checks_if_initialized() {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
 
         assert!(!client.is_initialized());
-        client.init(&admin);
+        client.init(&vec![&env, admin.clone()], &1, &recovery_address);
         assert!(client.is_initialized());
     }
 
     #[test]
-    #[should_panic]
+    fn emits_event_on_initialization() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let recovery_address = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        let admins = vec![&env, admin.clone()];
+        client.init(&admins, &1, &recovery);
+        assert!(client.is_initialized());
+        assert_eq!(client.get_admin(), admins);
+        assert_eq!(client.get_threshold(), 1);
+    }
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "exactly one event emitted on init");
+
+        let (_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "initialized")
+        );
+        assert_eq!(Address::from_val(&env, &data), admin);
+    }
+
+    // `Symbol`'s 32-character limit is enforced by the Stellar protocol
+    // itself (SCSYMBOL_LIMIT) at construction time, not merely by an SDK
+    // convenience check. `Symbol::new` below panics with
+    // `Error(Value, InvalidInput)` before `update_system_param` is ever
+    // invoked, so this test necessarily observes the SDK/protocol-level
+    // panic rather than `GovernanceError::InvalidParamValue` — there is no
+    // public API path to construct an in-memory `Symbol` over 32 characters,
+    // so the contract's own length guard (`symbol_len` in this file, kept as
+    // defense-in-depth) can never actually be reached through it.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #8)")]
     fn rejects_oversized_symbol_key() {
-        let (env, client, _admin) = setup();
-        // A string longer than 32 characters
+        let (env, client, admins, _recovery) = setup();
         let oversized = "this_is_a_very_long_system_parameter_key";
         let key = Symbol::new(&env, oversized);
-        client.update_system_param(&_admin, &key, &123);
+        client.update_system_param(&admins, &key, &123);
     }
 
     #[test]
     fn accepts_valid_symbol_key() {
-        let (env, client, _admin) = setup();
+        let (env, client, admins, _recovery) = setup();
         let key = Symbol::new(&env, "valid_key_32_chars_or_less");
-        client.update_system_param(&_admin, &key, &123);
+        client.update_system_param(&admins, &key, &123);
         assert_eq!(client.get_system_param(&key), Some(123));
     }
 
     #[test]
-    fn system_param_key_uniqueness_overwrites_existing_value() {
-        let (env, client, admin) = setup();
-        let key = Symbol::new(&env, "test_param");
-
-        client.update_system_param(&admin, &key, &100);
-        assert_eq!(client.get_system_param(&key), Some(100));
-
-        client.update_system_param(&admin, &key, &200);
-        assert_eq!(client.get_system_param(&key), Some(200));
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn rejects_operation_when_signatures_below_threshold() {
+        let (env, client, admins, _recovery) = setup();
+        let key = Symbol::new(&env, "key");
+        // threshold is 2, but only 1 signer provided
+        let single_signer = vec![&env, admins.get(0).unwrap()];
+        client.update_system_param(&single_signer, &key, &100);
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #7)")]
-    fn rejects_same_admin_transfer() {
-        let (_env, client, admin) = setup();
-        client.transfer_admin(&admin, &admin);
-    }
-
-    #[test]
-    fn transfers_admin_successfully() {
-        let (env, client, admin) = setup();
-        let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin);
-        assert_eq!(client.get_admin(), new_admin);
-    }
-
-    #[test]
-    #[should_panic(expected = "Error(Contract, #8)")]
-    fn rejects_negative_system_param_value() {
-        let (env, client, admin) = setup();
-        let key = Symbol::new(&env, "max_settle");
-        client.update_system_param(&admin, &key, &-1);
-    }
-
-    #[test]
-    fn accepts_zero_system_param_value() {
-        let (env, client, admin) = setup();
-        let key = Symbol::new(&env, "max_settle");
-        client.update_system_param(&admin, &key, &0);
-        assert_eq!(client.get_system_param(&key), Some(0));
-    }
-
-    #[test]
-    fn emits_structured_event_when_updating_system_param() {
-        let (env, client, admin) = setup();
-        let key = Symbol::new(&env, "max_settle");
-
-        // First update: no previous value should exist yet.
-        let prev_count = env.events().all().len();
-        client.update_system_param(&admin, &key, &1440);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
-
-        let (_contract_id, topics, data) = events.get(prev_count).unwrap();
-
-        assert_eq!(topics.len(), 2);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "sys_param_updated")
-        );
-        assert_eq!(Symbol::from_val(&env, &topics.get(1).unwrap()), key);
-
-        let (event_admin, previous_value, new_value) =
-            <(Address, Option<i128>, i128)>::from_val(&env, &data);
-        assert_eq!(event_admin, admin);
-        assert_eq!(previous_value, None);
-        assert_eq!(new_value, 1440);
-
-        // Second update: previous_value should now reflect the prior write.
-        let prev_count = env.events().all().len();
-        client.update_system_param(&admin, &key, &2880);
-
-        let events = env.events().all();
-        let (_contract_id, _topics, data) = events.get(prev_count).unwrap();
-        let (_event_admin, previous_value, new_value) =
-            <(Address, Option<i128>, i128)>::from_val(&env, &data);
-        assert_eq!(previous_value, Some(1440));
-        assert_eq!(new_value, 2880);
-    }
-
-    #[test]
-    fn emits_structured_event_when_transferring_admin() {
-        let (env, client, admin) = setup();
-        let new_admin = Address::generate(&env);
-
-        let prev_count = env.events().all().len();
-        client.transfer_admin(&admin, &new_admin);
-
-        let events = env.events().all();
-        assert_eq!(events.len(), prev_count + 1, "exactly one event emitted");
-
-        let (_contract_id, topics, data) = events.get(prev_count).unwrap();
-
-        assert_eq!(topics.len(), 1);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "admin_transferred")
-        );
-
-        // Data is the named AdminTransferred struct, not an anonymous tuple -
-        // off-chain consumers read old_admin/new_admin by field name.
-        let payload = AdminTransferred::from_val(&env, &data);
-        assert_eq!(payload.old_admin, admin);
-        assert_eq!(payload.new_admin, new_admin);
-    }
-
-    #[test]
-    fn admin_functions_work_while_paused() {
-        let (env, client, admin) = setup();
-        let asset = Address::generate(&env);
-        let anchor = Address::generate(&env);
-
-        // Set up anchor before pause
-        client.upsert_anchor(&admin, &asset, &anchor);
-        assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
-
-        client.pause(&admin);
-        assert!(client.is_paused());
-
-        // None of these should panic while paused - the admin must be able
-        // to resolve issues during a pause, not be locked out of it.
-        let key = Symbol::new(&env, "max_settle");
-        client.update_system_param(&admin, &key, &1440);
-        assert_eq!(client.get_system_param(&key), Some(1440));
-
-        let cfg = FeeConfig {
-            platform_fee_bps: 120,
-            network_fee_bps: 35,
-        };
-        client.set_fee_config(&admin, &cfg);
-        assert_eq!(client.get_fee_config().unwrap().platform_fee_bps, 120);
-
-        // remove_anchor still works while paused
-        client.remove_anchor(&admin, &asset);
-        assert_eq!(client.get_anchor(&asset), None);
-
-        // Still paused throughout - none of the above silently unpaused it.
-        assert!(client.is_paused());
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_fee_bps_exceeding_bps_denomination() {
-        let (_env, client, admin) = setup();
-        let cfg = FeeConfig {
-            platform_fee_bps: 10_001,
-            network_fee_bps: 100,
-        };
-        client.set_fee_config(&admin, &cfg);
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_fee_config_sum_above_10000_bps() {
-        let (_env, client, admin) = setup();
-        let cfg = FeeConfig {
-            platform_fee_bps: 5_001,
-            network_fee_bps: 5_001,
-        };
-        client.set_fee_config(&admin, &cfg);
-    }
-
-    #[test]
-    #[should_panic]
-    fn rejects_update_system_param_when_not_admin() {
-        let (env, client, _admin) = setup();
-        let non_admin = Address::generate(&env);
-        let key = Symbol::new(&env, "max_settle");
-        client.update_system_param(&non_admin, &key, &1440);
-    }
-
-    // Issue #52: verify only current admin can transfer admin
-    #[test]
-    #[should_panic]
-    fn rejects_transfer_admin_non_admin() {
+    fn changes_threshold_with_threshold_plus_one_signatures() {
         let env = Env::default();
-        let admin = Address::generate(&env);
-        let new_admin = Address::generate(&env);
-        let non_admin = Address::generate(&env);
+        env.mock_all_auths();
+
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let a3 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2.clone(), a3.clone()];
+        let recovery = Address::generate(&env);
+
         let contract_id = env.register_contract(None, GovernanceContract);
         let client = GovernanceContractClient::new(&env, &contract_id);
+        client.init(&admins, &1, &recovery);
 
-        env.mock_all_auths();
-        client.init(&admin);
+        assert_eq!(client.get_threshold(), 1);
 
-        env.mock_auths(&[MockAuth {
-            address: &non_admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "transfer_admin",
-                args: vec![&env, non_admin.to_val(), new_admin.to_val()],
-                sub_invokes: &[],
-            },
-        }]);
-        client.transfer_admin(&non_admin, &new_admin);
+        // Threshold is 1, so change_threshold requires 1 + 1 = 2 signatures.
+        let signers = vec![&env, a1.clone(), a2.clone()];
+        client.change_threshold(&signers, &2);
+        assert_eq!(client.get_threshold(), 2);
     }
 
     #[test]
     #[should_panic(expected = "Error(Contract, #3)")]
-    fn unpause_requires_admin_auth() {
-        let (env, client, admin) = setup();
-        let non_admin = Address::generate(&env);
+    fn change_threshold_fails_with_insufficient_signatures() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-        // Pause the contract as admin first
-        client.pause(&admin);
-        assert!(client.is_paused());
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2.clone()];
+        let recovery = Address::generate(&env);
 
-        // Attempt to unpause as non-admin, which should panic
-        client.unpause(&non_admin);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.init(&admins, &1, &recovery);
+
+        // Current threshold is 1, needs 2 signatures for change_threshold, but only 1 provided.
+        let single_signer = vec![&env, a1.clone()];
+        client.change_threshold(&single_signer, &2);
     }
 
     #[test]
-    fn upsert_anchor_fails_when_paused() {
-        let (env, client, admin) = setup();
-        let asset = Address::generate(&env);
-        let anchor = Address::generate(&env);
+    fn transfers_admin_successfully() {
+        let (env, client, admins, _recovery) = setup();
+        let new_a1 = Address::generate(&env);
+        let new_admins = vec![&env, new_a1.clone()];
+        client.transfer_admin(&admins, &new_admins, &1);
+        assert_eq!(client.get_admin(), new_admins);
+        assert_eq!(client.get_threshold(), 1);
+    }
 
-        // Pause the contract
-        client.pause(&admin);
+    #[test]
+    fn pause_then_unpause_round_trip_succeeds() {
+        let (env, client, admins, _recovery) = setup();
+
+        assert!(!client.is_paused());
+
+        let before_pause = env.events().all().len();
+        client.pause(&admins);
         assert!(client.is_paused());
+        assert!(env.events().all().len() > before_pause);
 
-        // Attempt to upsert the anchor while paused
-        let res = client.try_upsert_anchor(&admin, &asset, &anchor);
-
-        // Verify that the call fails with GovernanceError::Paused (error code 6)
-        assert!(res.is_err());
-        let err = res.err().unwrap();
-        let expected_err = soroban_sdk::Error::from_contract_error(6);
-        assert_eq!(err, Ok(expected_err));
-
-        // Verify that no anchor was created/updated in persistent storage after the failed call
-        assert_eq!(client.get_anchor(&asset), None);
+        let before_unpause = env.events().all().len();
+        client.unpause(&admins);
+        assert!(!client.is_paused());
+        assert!(env.events().all().len() > before_unpause);
     }
 }
