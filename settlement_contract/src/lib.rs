@@ -143,6 +143,8 @@ use bettapay_common::{
     storage::{self, CommonDataKey},
 };
 use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address,
+    BytesN, Env, String, Symbol, Val, Vec,
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, IntoVal, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
@@ -507,6 +509,21 @@ impl SettlementContract {
             .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
     }
 
+    /// Transfer the admin role to a new address.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`InvalidAddress`](SettlementError::InvalidAddress) — if `new_admin` is the zero address.
+    /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if `new_admin` is the same as the current admin.
+    ///
+    /// ## Emitted Event: `admin`
+    ///
+    /// **Topics**: `(Symbol("admin_transferred"),)`
+    /// **Data**: `Address new_admin`
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        let admin = read_admin(&env);
+        admin.require_auth();
     pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admins: Vec<Address>, new_threshold: u32) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         validate_admins_and_threshold(&env, &new_admins, new_threshold);
@@ -525,6 +542,9 @@ impl SettlementContract {
         if new_threshold == 0 || new_threshold > admins.len() {
             panic_with_error!(&env, SettlementError::InvalidThreshold);
         }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish((Symbol::new(&env, "admin_transferred"),), new_admin);
 
         env.storage().instance().set(&DataKey::Threshold, &new_threshold);
         env.events().publish(
@@ -564,6 +584,40 @@ impl SettlementContract {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
+    /// Pause the contract, preventing certain operations.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
+    ///
+    /// ## Emitted Event: `pause`
+    ///
+    /// **Topics**: `(Symbol("paused"),)`
+    /// **Data**: `bool true`
+    pub fn pause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "paused"),), true);
+    }
+
+    /// Unpause the contract, re-enabling paused operations.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if the caller is not the admin.
+    ///
+    /// ## Emitted Event: `unpause`
+    ///
+    /// **Topics**: `(Symbol("unpaused"),)`
+    /// **Data**: `bool false`
+    pub fn unpause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "unpaused"),), false);
     pub fn pause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();

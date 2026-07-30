@@ -374,7 +374,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "pause"
+                "symbol": "paused"
               }
             ],
             "data": {
@@ -486,7 +486,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "unpause"
+                "symbol": "unpaused"
               }
             ],
             "data": {
