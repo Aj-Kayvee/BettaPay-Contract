@@ -493,6 +493,11 @@ impl SettlementContract {
         if env.ledger().timestamp() < pending.execute_after {
             panic_with_error!(&env, SettlementError::RecoveryDelayActive);
         }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            new_admin,
+        );
 
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
         env.storage().instance().set(&DataKey::Admin, &new_admins);
@@ -1490,6 +1495,33 @@ fn validate_fee_against_governance(env: &Env, rule: &SettlementRule) {
             panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
         }
     }
+
+    // Verify event emitted on admin transfer
+    #[test]
+    fn emits_event_on_admin_transfer() {
+        let (env, client, _admin, _merchant) = setup();
+        let new_admin = Address::generate(&env);
+
+        let before = env.events().all().len();
+        client.transfer_admin(&new_admin);
+
+        let events = env.events().all();
+        assert_eq!(
+            events.len(),
+            before + 1,
+            "exactly one event should be emitted by transfer_admin"
+        );
+
+        let event = events.last().unwrap();
+        let (contract_id, topics, data) = event;
+
+        assert_eq!(contract_id, client.address);
+        assert_eq!(topics.len(), 1);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, "admin_transferred")
+        );
+        assert_eq!(Address::from_val(&env, &data), new_admin);
     if let Some(gov_network_val) = governance_fee.get(1) {
         let gov_network_bps: u32 = u32::try_from_val(env, &gov_network_val)
             .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
