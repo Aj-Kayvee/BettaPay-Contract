@@ -4,34 +4,14 @@
 
 set -euo pipefail
 
-# ANSI color codes
-BOLD='\033[1m'
-BLUE='\033[34m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-RED='\033[31m'
-NC='\033[0m' # No Color
+# Load shared helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
 # Limits (in bytes)
 # Soroban contracts should optimally be under 64KB (65536 bytes)
 WARN_LIMIT=65536
 ERROR_LIMIT=131072 # 128KB hard boundary
-
-log_info() {
-  echo -e "${BLUE}${BOLD}[INFO]${NC} $1"
-}
-
-log_success() {
-  echo -e "${GREEN}${BOLD}[SUCCESS]${NC} $1"
-}
-
-log_warn() {
-  echo -e "${YELLOW}${BOLD}[WARNING]${NC} $1"
-}
-
-log_error() {
-  echo -e "${RED}${BOLD}[ERROR]${NC} $1" >&2
-}
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WASM_DIR="$ROOT_DIR/target/wasm32-unknown-unknown/release"

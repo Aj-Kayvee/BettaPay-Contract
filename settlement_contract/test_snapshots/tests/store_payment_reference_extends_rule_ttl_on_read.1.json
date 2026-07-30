@@ -379,6 +379,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "merchant"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "merchant_amount"
                       },
                       "val": {
@@ -1032,6 +1040,14 @@
                       },
                       "val": {
                         "u32": 1000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "merchant"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                       }
                     },
                     {

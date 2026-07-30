@@ -252,7 +252,7 @@
             },
             "ext": "v0"
           },
-          100000
+          518400
         ]
       ],
       [
@@ -273,7 +273,7 @@
             },
             "ext": "v0"
           },
-          100000
+          518400
         ]
       ]
     ]
@@ -306,6 +306,26 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 }
               ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000003",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "initialized"
+              }
+            ],
+            "data": {
+              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
             }
           }
         }
