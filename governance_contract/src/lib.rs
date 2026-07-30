@@ -370,7 +370,7 @@ impl GovernanceContract {
     ///   `(new_wasm_hash)`.
     ///
     /// ### Panics
-    /// - If the caller is not the stored admin.
+    /// - Panics with [`Unauthorized`](GovernanceError::Unauthorized) if the caller is not the current admin.
     pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
         let admin = read_admin(&env);
         if caller != admin {

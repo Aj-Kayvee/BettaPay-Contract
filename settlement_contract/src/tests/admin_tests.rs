@@ -191,12 +191,28 @@ fn merchant_registration_blocked_when_paused() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn set_settlement_rule_rejected_when_paused() {
     let (_env, client, _admin, merchant) = setup();
+    client.register_merchant(&merchant);
+
     client.pause();
     assert!(client.is_paused());
 
+    let rule = SettlementRule {
+        platform_fee_bps: 250,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 7,
+        auto_settle: true,
+    };
+    client.set_settlement_rule(&merchant, &rule);
+}
+
+// Issue #350: the merchant-specific settlement rule must not be cleared while paused.
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn clear_settlement_rule_rejected_when_paused() {
+    let (_env, client, _admin, merchant) = setup();
     client.register_merchant(&merchant);
 
     let rule = SettlementRule {
@@ -206,6 +222,11 @@ fn set_settlement_rule_rejected_when_paused() {
         auto_settle: true,
     };
     client.set_settlement_rule(&merchant, &rule);
+
+    client.pause();
+    assert!(client.is_paused());
+
+    client.clear_settlement_rule(&merchant);
 }
 
 // Issue #231: the global default settlement rule must not be updated while paused.
