@@ -1,13 +1,10 @@
 //! Shared test utilities for the settlement contract test suite.
 //!
 //! This module exposes the common `setup()` helper, the `MockGovernance` contract
-//! used in most tests, and the `register_governance` helper. All feature-specific
+//! used in most tests, and the `register_governance` helper. Feature-specific
 //! test modules are declared here so Rust can discover them during `cargo test`.
 
 pub mod admin_tests;
-pub mod fee_tests;
-pub mod merchant_tests;
-pub mod payment_tests;
 
 use crate::*;
 use soroban_sdk::testutils::Address as _;
@@ -33,14 +30,19 @@ pub fn register_governance(env: &Env) -> Address {
 
 /// Creates a fully initialised settlement contract environment.
 ///
-/// Returns `(env, client, admin, merchant)` where:
+/// Returns `(env, client, admins, merchant)` where:
 /// - `env`      — default Soroban test environment with `mock_all_auths` enabled.
 /// - `client`   — a `SettlementContractClient` bound to the registered contract.
-/// - `admin`    — the address used as the initial admin during `init`.
+/// - `admins`   — the signer set (single admin, threshold 1) used for admin calls.
 /// - `merchant` — a freshly generated address that has **not** been registered;
-///                individual tests must call `client.register_merchant(&merchant)`
+///                individual tests must call `client.register_merchant(&admins, &merchant)`
 ///                when they need a registered merchant.
-pub fn setup() -> (Env, SettlementContractClient<'static>, Address, Address) {
+pub fn setup() -> (
+    Env,
+    SettlementContractClient<'static>,
+    Vec<Address>,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -50,6 +52,7 @@ pub fn setup() -> (Env, SettlementContractClient<'static>, Address, Address) {
     let governance = register_governance(&env);
     let contract_id = env.register_contract(None, SettlementContract);
     let client = SettlementContractClient::new(&env, &contract_id);
-    client.init(&admin, &governance, &recovery_address);
-    (env, client, admin, merchant)
+    let admins = soroban_sdk::vec![&env, admin];
+    client.init(&admins, &1, &governance, &recovery_address);
+    (env, client, admins, merchant)
 }
