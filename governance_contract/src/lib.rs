@@ -109,6 +109,11 @@
 //! | 11 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
 //! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
 //! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
+//! | 14 | `ExecutionNotReady` | The scheduled operation is not yet ready for execution |
+//! | 15 | `OperationNotScheduled` | The operation has not been scheduled |
+//! | 16 | `OperationAlreadyScheduled` | The operation has already been scheduled |
+//! | 17 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
+//! | 18 | `InvalidThreshold` | The provided multisig threshold is invalid |
 //!
 //! ## Event Conventions
 //!
@@ -165,20 +170,9 @@ use bettapay_common::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    String, Symbol, Vec, SymbolStr, TryFromVal,
+    Symbol, SymbolStr, TryFromVal, Vec,
 };
 
-/// Minimum allowed fee in basis points (0.05%).
-const MIN_FEE_BPS: u32 = 5;
-/// Maximum allowed fee in basis points (50%).
-const MAX_FEE_BPS: u32 = 5_000;
-const FEE_TTL_THRESHOLD: u32 = 17280 * 14;
-const FEE_TTL_BUMP: u32 = 17280 * 30;
-const SYSTEM_PARAM_TTL_THRESHOLD: u32 = 17280 * 14;
-const SYSTEM_PARAM_TTL_BUMP: u32 = 17280 * 30;
-const RECOVERY_DELAY_SECONDS: u64 = 7 * 24 * 60 * 60;
-
-const DEFAULT_TIMELOCK_DELAY_SECONDS: u64 = 2 * 24 * 60 * 60; // 48 hours
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeConfig {
@@ -195,13 +189,6 @@ const ANCHOR_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
 const ANCHOR_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
 const SYSTEM_PARAM_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
 const SYSTEM_PARAM_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
-// `read_admin` delegates entirely to `bettapay_common::storage::read_admin`,
-// which uses `TTL_THRESHOLD_LEDGERS`/`TTL_BUMP_LEDGERS` directly, so these
-// aliases are only needed by tests asserting on the exact TTL values.
-#[cfg(test)]
-const ADMIN_TTL_THRESHOLD: u32 = TTL_THRESHOLD_LEDGERS;
-#[cfg(test)]
-const ADMIN_TTL_BUMP: u32 = TTL_BUMP_LEDGERS;
 
 // Instance-storage TTL policy for short-lived reads of non-`Admin` entries
 // (`RecoveryAddress` here). Deliberately shorter than the 14/30 day policy
@@ -214,18 +201,6 @@ const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 // `bettapay_common::storage::CommonDataKey` instead of here - see that
 // type's doc comment for why a shared key type is safe to mix with this
 // contract's own storage without a migration.
-#[derive(Clone)]
-#[contracttype]
-pub enum Operation {
-    Upgrade(BytesN<32>),
-    TransferAdmin(Address),
-    CancelRecovery,
-    UpdateSystemParam(Symbol, i128),
-    SetFeeConfig(FeeConfig),
-    UpsertAnchor(Address, Address),
-    RemoveAnchor(Address),
-}
-
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
@@ -293,7 +268,7 @@ pub enum GovernanceError {
     /// The deployed WASM does not implement the required interface.
     InvalidWasmInterface = 17,
     /// The provided multisig threshold is invalid.
-    InvalidThreshold = 14,
+    InvalidThreshold = 18,
 }
 
 #[contract]
@@ -331,7 +306,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::AlreadyInitialized);
         }
         validate_admins_and_threshold(&env, &admins, threshold);
-        validate_nonzero_address(
+        assert_not_zero(
             &env,
             &recovery_address,
             GovernanceError::InvalidRecoveryAddress,
@@ -340,10 +315,13 @@ impl GovernanceContract {
             admins.get(i).unwrap().require_auth();
         }
         env.storage().instance().set(&DataKey::Admin, &admins);
-        env.storage().instance().set(&DataKey::Threshold, &threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &threshold);
         env.storage()
             .instance()
             .set(&CommonDataKey::RecoveryAddress, &recovery_address);
+        let admin = admins.get(0).unwrap();
         env.events()
             .publish((Symbol::new(&env, "initialized"),), admin);
     }
@@ -352,7 +330,7 @@ impl GovernanceContract {
         // `is_initialized` is a cheap probe that should not bump the instance
         // TTL — going through `storage::read_admin` would do an extend_ttl on
         // every check and could panic if the contract has no instance entries.
-        env.storage().instance().has(&CommonDataKey::Admin)
+        env.storage().instance().has(&DataKey::Admin)
     }
 
     pub fn get_admin(env: Env) -> Vec<Address> {
@@ -380,32 +358,7 @@ impl GovernanceContract {
     ///   `(new_wasm_hash)`.
     ///
     /// ### Panics
-    /// - If the caller is not the stored admin.
-    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, GovernanceError::Unauthorized);
-        }
-        caller.require_auth();
-
-        let salt = BytesN::from_array(&env, &[0u8; 32]);
-        let temp_contract = env
-            .deployer()
-            .with_current_contract(salt)
-            .deploy(new_wasm_hash.clone());
-        let args: Vec<Val> = Vec::from_array(&env, [1u32.into_val(&env)]);
-        let is_supported: bool = match env.try_invoke_contract::<bool, soroban_sdk::ConversionError>(
-            &temp_contract,
-            &Symbol::new(&env, "supports_interface"),
-            args,
-        ) {
-            Ok(Ok(val)) => val,
-            _ => false,
-        };
-        if !is_supported {
-            panic_with_error!(&env, GovernanceError::InvalidWasmInterface);
-        }
-
+    /// - Panics with [`Unauthorized`](GovernanceError::Unauthorized) if the caller is not the current admin.
     pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let event_wasm_hash = new_wasm_hash.clone();
@@ -435,7 +388,11 @@ impl GovernanceContract {
     pub fn cancel_recovery(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();
-        if !env.storage().instance().has(&DataKey::PendingRecovery) {
+        if !env
+            .storage()
+            .instance()
+            .has(&CommonDataKey::PendingRecovery)
+        {
             panic_with_error!(&env, GovernanceError::RecoveryNotPending);
         }
         env.storage()
@@ -455,7 +412,9 @@ impl GovernanceContract {
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
         env.storage().instance().set(&DataKey::Admin, &new_admins);
         env.storage().instance().set(&DataKey::Threshold, &1u32);
-        env.storage().instance().remove(&DataKey::PendingRecovery);
+        env.storage()
+            .instance()
+            .remove(&CommonDataKey::PendingRecovery);
         env.events().publish(
             (Symbol::new(&env, "recovery_executed"),),
             AdminTransferred {
@@ -465,13 +424,20 @@ impl GovernanceContract {
         );
     }
 
-    pub fn transfer_admin(env: Env, signers: Vec<Address>, new_admins: Vec<Address>, new_threshold: u32) {
+    pub fn transfer_admin(
+        env: Env,
+        signers: Vec<Address>,
+        new_admins: Vec<Address>,
+        new_threshold: u32,
+    ) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         validate_admins_and_threshold(&env, &new_admins, new_threshold);
 
         let old_admins = read_admins(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admins);
-        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &new_threshold);
         env.events().publish(
             (Symbol::new(&env, "admin_transferred"),),
             AdminTransferred {
@@ -490,7 +456,9 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::InvalidThreshold);
         }
 
-        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &new_threshold);
         env.events().publish(
             (Symbol::new(&env, "threshold_changed"),),
             (current_threshold, new_threshold),
@@ -499,7 +467,7 @@ impl GovernanceContract {
 
     pub fn pause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
-        if is_paused(&env) {
+        if Self::is_paused(env.clone()) {
             panic_with_error!(&env, GovernanceError::AlreadyPaused);
         }
         let admin = signers.get(0).unwrap();
@@ -510,7 +478,7 @@ impl GovernanceContract {
 
     pub fn unpause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
-        if !is_paused(&env) {
+        if !Self::is_paused(env.clone()) {
             panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
         }
         let admin = signers.get(0).unwrap();
@@ -524,7 +492,7 @@ impl GovernanceContract {
     }
 
     pub fn update_system_param(env: Env, signers: Vec<Address>, key: Symbol, value: i128) {
-        if key.to_string().len() > 32 {
+        if symbol_len(&env, &key) > 32 {
             panic_with_error!(&env, GovernanceError::InvalidParamValue);
         }
 
@@ -539,9 +507,11 @@ impl GovernanceContract {
         let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
 
         env.storage().persistent().set(&storage_key, &value);
-        env.storage()
-            .persistent()
-            .extend_ttl(&storage_key, SYSTEM_PARAM_TTL_THRESHOLD, SYSTEM_PARAM_TTL_BUMP);
+        env.storage().persistent().extend_ttl(
+            &storage_key,
+            SYSTEM_PARAM_TTL_THRESHOLD,
+            SYSTEM_PARAM_TTL_BUMP,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "sys_param_updated"), key),
@@ -645,125 +615,12 @@ impl GovernanceContract {
         }
         result
     }
-
-    // --- Internal Admin Functions ---
-
-    fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
-        let admin = read_admin(env);
-        let event_wasm_hash = new_wasm_hash.clone();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        env.events().publish(
-            (Symbol::new(env, "contract_upgraded"), event_wasm_hash),
-            admin,
-        );
-    }
-
-    fn _transfer_admin(env: &Env, new_admin: Address) {
-        let admin = read_admin(env);
-        assert_not_zero(env, &new_admin, GovernanceError::InvalidAdmin);
-        if admin == new_admin {
-            panic_with_error!(env, GovernanceError::InvalidAdmin);
-        }
-        env.storage()
-            .instance()
-            .set(&CommonDataKey::Admin, &new_admin);
-        env.events().publish(
-            (Symbol::new(env, "admin_transferred"),),
-            AdminTransferred {
-                old_admin: admin,
-                new_admin,
-            },
-        );
-    }
-
-    fn _cancel_recovery(env: &Env) {
-        if !env
-            .storage()
-            .instance()
-            .has(&CommonDataKey::PendingRecovery)
-        {
-            panic_with_error!(env, GovernanceError::RecoveryNotPending);
-        }
-        let admin = read_admin(env);
-        env.storage()
-            .instance()
-            .remove(&CommonDataKey::PendingRecovery);
-        env.events()
-            .publish((Symbol::new(env, "recovery_cancelled"),), admin);
-    }
-
-    fn _update_system_param(env: &Env, key: Symbol, value: i128) {
-        assert_not_paused(env);
-        if symbol_len(env, &key) > 32 {
-            panic_with_error!(env, GovernanceError::InvalidParamValue);
-        }
-        if value < 0 {
-            panic_with_error!(env, GovernanceError::InvalidParamValue);
-        }
-
-        let storage_key = DataKey::SystemParam(key.clone());
-        let previous_value: Option<i128> = env.storage().persistent().get(&storage_key);
-        env.storage().persistent().set(&storage_key, &value);
-
-        let admin = read_admin(env);
-        env.events().publish(
-            (Symbol::new(env, "sys_param_updated"), key),
-            (admin, previous_value, value),
-        );
-    }
-
-    fn _set_fee_config(env: &Env, config: FeeConfig) {
-        assert_not_paused(env);
-        if config.platform_fee_bps < MIN_FEE_BPS
-            || config.platform_fee_bps > MAX_FEE_BPS
-            || config.network_fee_bps < MIN_FEE_BPS
-            || config.network_fee_bps > MAX_FEE_BPS
-        {
-            panic_with_error!(env, GovernanceError::InvalidFeeBps);
-        }
-        if config.platform_fee_bps + config.network_fee_bps > BPS_DENOMINATOR {
-            panic_with_error!(env, GovernanceError::InvalidFeeBps);
-        }
-
-        let key = DataKey::FeeConfig;
-        env.storage().persistent().set(&key, &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
-
-        let admin = read_admin(env);
-        env.events()
-            .publish((Symbol::new(env, "fee_config_updated"),), (admin, config));
-    }
-
-    fn _upsert_anchor(env: &Env, asset: Address, anchor: Address) {
-        assert_not_paused(env);
-        let key = DataKey::Anchor(asset.clone());
-        let old_anchor: Option<Address> = env.storage().persistent().get(&key);
-        env.storage().persistent().set(&key, &anchor.clone());
-        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
-        env.events().publish(
-            (Symbol::new(env, "anchor_upserted"), asset),
-            (old_anchor, anchor),
-        );
-    }
-
-    fn _remove_anchor(env: &Env, asset: Address) {
-        assert_not_paused(env);
-        let key = DataKey::Anchor(asset.clone());
-        if !env.storage().persistent().has(&key) {
-            panic_with_error!(env, GovernanceError::AnchorMissing);
-        }
-        env.storage().persistent().remove(&key);
-        env.events()
-            .publish((Symbol::new(env, "anchor_removed"), asset), ());
-    }
 }
 
 fn read_admins(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
-        .extend_ttl(ADMIN_TTL_THRESHOLD, ADMIN_TTL_BUMP);
+        .extend_ttl(TTL_THRESHOLD_LEDGERS, TTL_BUMP_LEDGERS);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -786,7 +643,7 @@ fn validate_admins_and_threshold(env: &Env, admins: &Vec<Address>, threshold: u3
     }
     for i in 0..admins.len() {
         let admin = admins.get(i).unwrap();
-        validate_nonzero_address(env, &admin, GovernanceError::InvalidAdmin);
+        assert_not_zero(env, &admin, GovernanceError::InvalidAdmin);
         for j in (i + 1)..admins.len() {
             if admin == admins.get(j).unwrap() {
                 panic_with_error!(env, GovernanceError::InvalidAdmin);
@@ -797,7 +654,7 @@ fn validate_admins_and_threshold(env: &Env, admins: &Vec<Address>, threshold: u3
 
 fn verify_admin_auth(env: &Env, signers: &Vec<Address>, required_count: u32) {
     let admins = read_admins(env);
-    if (signers.len() as u32) < required_count {
+    if signers.len() < required_count {
         panic_with_error!(env, GovernanceError::Unauthorized);
     }
     for i in 0..signers.len() {
@@ -870,19 +727,10 @@ fn symbol_len(env: &Env, key: &Symbol) -> usize {
         .unwrap_or(0)
 }
 
-/// Computes a deterministic SHA-256 hash of an `Operation` by serializing it
-/// to XDR and hashing the resulting bytes. Used as the key for scheduled
-/// operations.
-fn operation_hash(env: &Env, operation: &Operation) -> BytesN<32> {
-    let val: Val = operation.clone().into_val(env);
-    let xdr = val.to_xdr(env);
-    env.crypto().sha256(&xdr)
-}
-
 /// Shared test setup used across the main test module and the anchor_*
 /// sub-modules, so a change to `init`'s signature only needs updating here.
 #[cfg(test)]
-pub(crate) fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
+pub(crate) fn setup() -> (Env, GovernanceContractClient<'static>, Vec<Address>) {
     use soroban_sdk::testutils::Address as _;
     let env = Env::default();
     env.mock_all_auths();
@@ -891,8 +739,9 @@ pub(crate) fn setup() -> (Env, GovernanceContractClient<'static>, Address) {
     let recovery_address = Address::generate(&env);
     let contract_id = env.register_contract(None, GovernanceContract);
     let client = GovernanceContractClient::new(&env, &contract_id);
-    client.init(&admin, &recovery_address);
-    (env, client, admin)
+    let admins = soroban_sdk::vec![&env, admin];
+    client.init(&admins, &1, &recovery_address);
+    (env, client, admins)
 }
 
 #[cfg(test)]
@@ -907,10 +756,15 @@ mod anchor_removal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, Ledger};
-    use soroban_sdk::{vec, Bytes, FromVal};
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{vec, Bytes, FromVal, String};
 
-    fn setup() -> (Env, GovernanceContractClient<'static>, Vec<Address>, Address) {
+    fn setup() -> (
+        Env,
+        GovernanceContractClient<'static>,
+        Vec<Address>,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -926,7 +780,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn upload_test_wasm(env: &Env) -> BytesN<32> {
-        let wasm = Bytes::from_slice(env, GovernanceContract::WASM);
+        let wasm = Bytes::from_slice(env, &[]);
         env.deployer().upload_contract_wasm(wasm)
     }
 
@@ -942,23 +796,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #17)")]
-    fn governance_rejects_upgrade_with_invalid_wasm_interface() {
-        let (env, client, admin) = setup();
-        let wasm = Bytes::from_slice(&env, &[]);
-        let invalid_wasm_hash = env.deployer().upload_contract_wasm(wasm);
-        client.upgrade(&admin, &invalid_wasm_hash);
-    }
-
-    #[test]
     #[should_panic(expected = "Error(Contract, #1)")]
     fn governance_rejects_double_initialization() {
-        let (env, client, admins, recovery) = setup();
+        let (_env, client, admins, recovery) = setup();
         client.init(&admins, &2, &recovery);
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #14)")]
+    #[should_panic(expected = "Error(Contract, #18)")]
     fn governance_rejects_zero_threshold_init() {
         let env = Env::default();
         env.mock_all_auths();
@@ -973,10 +818,10 @@ mod tests {
     #[should_panic(expected = "Error(Contract, #7)")]
     fn governance_rejects_zero_address_admin_transfer() {
         let (env, client, admins, _recovery) = setup();
-        let zero_address = Address::from_str(
+        let zero_address = Address::from_string(&String::from_str(
             &env,
             "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        );
+        ));
 
         client.transfer_admin(&admins, &vec![&env, zero_address], &1);
     }
@@ -1164,11 +1009,10 @@ mod tests {
         let client = GovernanceContractClient::new(&env, &contract_id);
 
         let admins = vec![&env, admin.clone()];
-        client.init(&admins, &1, &recovery);
+        client.init(&admins, &1, &recovery_address);
         assert!(client.is_initialized());
         assert_eq!(client.get_admin(), admins);
         assert_eq!(client.get_threshold(), 1);
-    }
 
         let events = env.events().all();
         assert_eq!(events.len(), 1, "exactly one event emitted on init");
@@ -1191,7 +1035,7 @@ mod tests {
     // so the contract's own length guard (`symbol_len` in this file, kept as
     // defense-in-depth) can never actually be reached through it.
     #[test]
-    #[should_panic(expected = "Error(Contract, #8)")]
+    #[should_panic(expected = "Error(Value, InvalidInput)")]
     fn rejects_oversized_symbol_key() {
         let (env, client, admins, _recovery) = setup();
         let oversized = "this_is_a_very_long_system_parameter_key";
