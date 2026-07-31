@@ -8,7 +8,7 @@ pub mod admin_tests;
 
 use crate::*;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{contract, contractimpl, Env};
+use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
 /// A minimal governance stub that returns `None` from `get_fee_config`.
 /// This satisfies `validate_governance` in `init`, which requires the
