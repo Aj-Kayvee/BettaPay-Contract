@@ -114,6 +114,7 @@
 //! | 16 | `OperationAlreadyScheduled` | The operation has already been scheduled |
 //! | 17 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
 //! | 18 | `InvalidThreshold` | The provided multisig threshold is invalid |
+//! | 19 | `SameAdmin` | Transfer target is identical to the current admin set and threshold |
 //!
 //! ## Event Conventions
 //!
@@ -269,6 +270,8 @@ pub enum GovernanceError {
     InvalidWasmInterface = 17,
     /// The provided multisig threshold is invalid.
     InvalidThreshold = 18,
+    /// The new admin set and threshold are identical to the current ones.
+    SameAdmin = 19,
 }
 
 #[contract]
@@ -424,16 +427,28 @@ impl GovernanceContract {
         );
     }
 
+    /// Transfers the admin set and multisig threshold to `new_admins` / `new_threshold`.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `GovernanceError::InvalidAdmin` if `new_admins` is empty or
+    /// contains the zero address or duplicate entries.
+    /// Panics with `GovernanceError::SameAdmin` if `new_admins` and `new_threshold`
+    /// are identical to the current admin set and threshold.
     pub fn transfer_admin(
         env: Env,
         signers: Vec<Address>,
         new_admins: Vec<Address>,
         new_threshold: u32,
     ) {
-        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let old_threshold = read_threshold(&env);
+        verify_admin_auth(&env, &signers, old_threshold);
         validate_admins_and_threshold(&env, &new_admins, new_threshold);
 
         let old_admins = read_admins(&env);
+        if old_admins == new_admins && old_threshold == new_threshold {
+            panic_with_error!(&env, GovernanceError::SameAdmin);
+        }
         env.storage().instance().set(&DataKey::Admin, &new_admins);
         env.storage()
             .instance()
@@ -824,6 +839,14 @@ mod tests {
         ));
 
         client.transfer_admin(&admins, &vec![&env, zero_address], &1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #19)")]
+    fn rejects_same_admin_transfer() {
+        let (_env, client, admins, _recovery) = setup();
+        let threshold = client.get_threshold();
+        client.transfer_admin(&admins, &admins, &threshold);
     }
 
     #[test]
