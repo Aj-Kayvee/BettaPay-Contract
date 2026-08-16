@@ -8,8 +8,8 @@ use bettapay_common::{
 use crate::errors::SettlementError;
 use crate::types::{DataKey, FeeConfig, SettlementRule};
 use crate::{
-    BOOTSTRAP_DEFAULT_RULE, MERCHANT_TTL_BUMP, MERCHANT_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP,
-    READ_INSTANCE_TTL_THRESHOLD, RULE_TTL_BUMP, RULE_TTL_THRESHOLD,
+    BOOTSTRAP_DEFAULT_RULE, MAX_SETTLEMENT_DELAY_LEDGER, MERCHANT_TTL_BUMP, MERCHANT_TTL_THRESHOLD,
+    READ_INSTANCE_TTL_BUMP, READ_INSTANCE_TTL_THRESHOLD, RULE_TTL_BUMP, RULE_TTL_THRESHOLD,
 };
 
 pub(crate) fn read_admins(env: &Env) -> Vec<Address> {
@@ -199,12 +199,18 @@ pub(crate) fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
         &Symbol::new(env, "get_fee_config"),
         args,
     ) {
-        Ok(Ok(Some(config))) => Some(SettlementRule {
-            platform_fee_bps: config.platform_fee_bps,
-            network_fee_bps: config.network_fee_bps,
-            settlement_delay_ledger: 0,
-            auto_settle: false,
-        }),
+        Ok(Ok(Some(config))) => {
+            let rule = SettlementRule {
+                platform_fee_bps: config.platform_fee_bps,
+                network_fee_bps: config.network_fee_bps,
+                settlement_delay_ledger: 0,
+                auto_settle: false,
+            };
+            if rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
+                panic_with_error!(env, SettlementError::InvalidSettlementDelay);
+            }
+            Some(rule)
+        }
         _ => None,
     }
 }

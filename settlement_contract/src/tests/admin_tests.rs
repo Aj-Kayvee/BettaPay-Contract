@@ -290,3 +290,40 @@ fn update_governance_stores_validated_address() {
 
     assert_eq!(client.get_governance(), new_governance);
 }
+
+#[contract]
+pub struct MockGovernanceWithFee;
+
+#[contractimpl]
+impl MockGovernanceWithFee {
+    pub fn get_fee_config(_env: Env) -> Option<FeeConfig> {
+        Some(FeeConfig {
+            platform_fee_bps: 100,
+            network_fee_bps: 50,
+        })
+    }
+}
+
+#[test]
+fn governance_derived_rule_conversion_applies_delay_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let governance = env.register_contract(None, MockGovernanceWithFee);
+    let contract_id = env.register_contract(None, SettlementContract);
+    let client = SettlementContractClient::new(&env, &contract_id);
+    let admins = soroban_sdk::vec![&env, admin];
+    client.init(&admins, &1, &governance, &recovery_address);
+    client.register_merchant(&admins, &merchant);
+
+    let reference = soroban_sdk::BytesN::from_array(&env, &[1; 32]);
+    let record = client.store_payment_reference(&merchant, &reference, &10_000);
+
+    assert_eq!(record.settlement_delay_ledger, 0);
+    assert!(record.settlement_delay_ledger <= MAX_SETTLEMENT_DELAY_LEDGER);
+}
+
