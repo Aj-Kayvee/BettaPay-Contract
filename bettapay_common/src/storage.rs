@@ -52,11 +52,18 @@ pub fn read_admin(env: &Env) -> Option<Address> {
 
 /// Returns `true` if the contract is currently paused.
 ///
-/// This is a cheap read: it just inspects the instance flag without bumping
-/// TTL or cloning data. Mutating operations that gate on pause state should
-/// still keep the flag warm via [`bump_instance_ttl`] if they care about the
-/// entry's lifetime.
+/// Bumps the instance TTL on every call, the same way [`read_admin`] does.
+/// Soroban's instance storage is a single ledger entry shared by every
+/// instance key (`Admin`, `Paused`, `RecoveryAddress`, ...), so in practice
+/// any instance read on a live contract keeps the whole entry — including
+/// the pause flag — warm. But a contract path that checks `is_paused`
+/// without also touching another instance key (or one that's simply quiet
+/// for a long stretch while paused) had no guaranteed keep-alive of its
+/// own, and a missing entry silently reads back as `unpaused` via
+/// `unwrap_or(false)` below rather than failing loudly. Bumping here removes
+/// that dependency on call order.
 pub fn is_paused(env: &Env) -> bool {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&CommonDataKey::Paused)
@@ -97,4 +104,51 @@ pub fn bump_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(TTL_THRESHOLD_LEDGERS, TTL_BUMP_LEDGERS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::contract;
+    use soroban_sdk::testutils::{storage::Instance as _, Ledger};
+
+    #[contract]
+    struct TestContract;
+
+    /// Regression test for issue #520: `is_paused` used to be a bare read
+    /// with no TTL side effect, unlike every other instance-storage reader
+    /// in this module. A contract whose only activity was pause checks (no
+    /// `read_admin` or other instance write/read to keep the entry warm)
+    /// could let the instance entry's TTL run out while paused, and a
+    /// missing entry silently reads back as "not paused" via
+    /// `unwrap_or(false)` rather than failing loudly.
+    #[test]
+    fn is_paused_bumps_instance_ttl() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TestContract);
+        env.as_contract(&contract_id, || {
+            set_paused(&env, true);
+            let initial_ttl = env.storage().instance().get_ttl();
+
+            // Advance far enough that the remaining TTL drops below the bump
+            // threshold, but not so far that the entry is archived outright.
+            let advance = initial_ttl.saturating_sub(TTL_THRESHOLD_LEDGERS) + 1_000;
+            env.ledger().with_mut(|li| {
+                li.sequence_number += advance;
+            });
+            let ttl_before = env.storage().instance().get_ttl();
+            assert!(
+                ttl_before < TTL_THRESHOLD_LEDGERS,
+                "test setup should have decayed the TTL below the threshold, got {ttl_before}",
+            );
+
+            assert!(is_paused(&env));
+
+            let ttl_after = env.storage().instance().get_ttl();
+            assert!(
+                ttl_after > ttl_before,
+                "is_paused should have refreshed the instance TTL: before={ttl_before}, after={ttl_after}",
+            );
+        });
+    }
 }
