@@ -239,7 +239,7 @@ lazy conversion for the long tail.
 
 ## Worked Example: Adding a Field to `PaymentRecord`
 
-Say `PaymentRecord` gains `settled: bool`.
+Say `PaymentRecord` (defined in `settlement_contract/src/types.rs`) gains `settled: bool`.
 
 A `#[contracttype]` struct is encoded as a map keyed by field name. An entry
 written before the field existed has no `settled` key, so deserialising it into
@@ -247,25 +247,34 @@ the new struct **fails** — the read panics. Existing rows do not silently pick
 up a default. This is why the old type has to stay in the Wasm.
 
 ```rust
-/// Pre-v2 shape. Retained only so existing entries can still be read during
-/// migration. Remove once every entry has been converted.
+/// Pre-v2 shape retained in Wasm so existing entries remain readable during lazy migration.
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentRecordV1 {
-    pub merchant: Address,
     pub amount: i128,
     pub platform_fee_amount: i128,
     pub network_fee_amount: i128,
     pub merchant_amount: i128,
     pub platform_fee_bps: u32,
     pub network_fee_bps: u32,
-    // ... remaining v1 fields
+    pub ledger: u32,
+    pub settlement_delay_ledger: u32,
+    pub auto_settle: bool,
 }
 
+/// Updated PaymentRecord shape with the new `settled` field.
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentRecord {
-    // ... same fields as V1, plus:
+    pub amount: i128,
+    pub platform_fee_amount: i128,
+    pub network_fee_amount: i128,
+    pub merchant_amount: i128,
+    pub platform_fee_bps: u32,
+    pub network_fee_bps: u32,
+    pub ledger: u32,
+    pub settlement_delay_ledger: u32,
+    pub auto_settle: bool,
     pub settled: bool,
 }
 
@@ -274,27 +283,32 @@ impl PaymentRecordV1 {
     /// tracking, so they are recorded as unsettled.
     fn into_v2(self) -> PaymentRecord {
         PaymentRecord {
-            merchant: self.merchant,
             amount: self.amount,
             platform_fee_amount: self.platform_fee_amount,
             network_fee_amount: self.network_fee_amount,
             merchant_amount: self.merchant_amount,
             platform_fee_bps: self.platform_fee_bps,
             network_fee_bps: self.network_fee_bps,
+            ledger: self.ledger,
+            settlement_delay_ledger: self.settlement_delay_ledger,
+            auto_settle: self.auto_settle,
             settled: false,
         }
     }
 }
 ```
 
-Read path, converting in place:
+Updating the actual contract getter entry point [`get_payment_reference`](settlement_contract/src/payments.rs) to convert in place on read:
 
 ```rust
-fn load_payment(env: &Env, reference: &BytesN<32>) -> Option<PaymentRecord> {
-    let key = DataKey::Payment(reference.clone());
+pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
+    let key = DataKey::Payment(reference);
 
     // New format first: after conversion this is the only branch taken.
     if let Some(record) = env.storage().persistent().get::<_, PaymentRecord>(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
         return Some(record);
     }
 
@@ -310,26 +324,19 @@ fn load_payment(env: &Env, reference: &BytesN<32>) -> Option<PaymentRecord> {
 }
 ```
 
-The eager half, for the fixed keys, gated and idempotent:
+The eager half, for fixed keys, gated by admin authentication and idempotent:
 
 ```rust
-/// Migrates singleton entries to schema version 2. Admin only, and refuses to
-/// run twice — a second run would re-apply defaults over migrated data.
-pub fn migrate(env: Env) {
+/// Migrates singleton entries to schema version 2. Admin only.
+pub fn migrate(env: Env, signers: Vec<Address>) {
+    assert_not_paused(&env);
+    verify_admin_auth(&env, &signers, read_threshold(&env));
     let admin = read_admin(&env);
-    admin.require_auth();
-
-    if read_schema_version(&env) >= CURRENT_SCHEMA_VERSION {
-        panic_with_error!(&env, SettlementError::AlreadyInitialized);
-    }
 
     // ... convert fixed-key entries here ...
 
-    env.storage()
-        .instance()
-        .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
     env.events()
-        .publish((Symbol::new(&env, "migrated"),), CURRENT_SCHEMA_VERSION);
+        .publish((Symbol::new(&env, "migrated"),), admin);
 }
 ```
 
