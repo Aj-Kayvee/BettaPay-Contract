@@ -3,7 +3,7 @@
 
 use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, FromVal, Symbol};
 
 use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
 
@@ -321,8 +321,9 @@ fn governance_derived_rule_conversion_applies_delay_cap() {
     client.register_merchant(&admins, &merchant);
 
     let reference = soroban_sdk::BytesN::from_array(&env, &[1; 32]);
-    let record = client.store_payment_reference(&merchant, &reference, &10_000);
+    client.store_payment_reference(&merchant, &reference, &10_000);
 
+    let record = client.get_payment_reference(&reference).unwrap();
     assert_eq!(record.settlement_delay_ledger, 0);
     assert!(record.settlement_delay_ledger <= MAX_SETTLEMENT_DELAY_LEDGER);
 }
