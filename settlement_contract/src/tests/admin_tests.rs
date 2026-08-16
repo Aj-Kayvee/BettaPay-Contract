@@ -290,3 +290,27 @@ fn update_governance_stores_validated_address() {
 
     assert_eq!(client.get_governance(), new_governance);
 }
+
+#[test]
+fn bps_newtype_conversions_and_arithmetic_helpers_work() {
+    let bps = Bps::new(250);
+    assert_eq!(bps.value(), 250);
+    assert_eq!(bps.as_i128(), 250i128);
+
+    let fee_amount = bps.calculate_fee_ceil(10_000);
+    assert_eq!(fee_amount, 250);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 150,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 0,
+        auto_settle: false,
+    };
+    assert_eq!(rule.platform_bps(), Bps::new(150));
+    assert_eq!(rule.network_bps(), Bps::new(50));
+
+    let from_u32: Bps = 100u32.into();
+    let to_u32: u32 = from_u32.into();
+    assert_eq!(to_u32, 100);
+}
+

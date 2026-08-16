@@ -157,7 +157,7 @@ mod tests;
 use soroban_sdk::contract;
 
 pub use errors::SettlementError;
-pub use types::{FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
+pub use types::{Bps, FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
 
 pub(crate) const MIN_PAYMENT_AMOUNT: i128 = 100;
 pub(crate) const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
