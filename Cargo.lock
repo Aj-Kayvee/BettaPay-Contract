@@ -1156,6 +1156,7 @@ name = "settlement_contract"
 version = "0.1.0"
 dependencies = [
  "bettapay_common",
+ "governance_contract",
  "proptest",
  "soroban-sdk",
 ]
