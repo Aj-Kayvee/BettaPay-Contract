@@ -21,9 +21,12 @@ pub const MIN_FEE_BPS: u32 = 5;
 
 /// Maximum allowed protocol-wide fee, in basis points (50 %).
 ///
-/// Currently enforced only by the governance `FeeConfig`, but defined here so
-/// the settlement contract can adopt the same upper bound without having to
-/// redeclare the constant.
+/// Enforced by both the governance `FeeConfig` and the settlement
+/// `SettlementRule`/default-rule setters, independent of whether a
+/// governance `FeeConfig` has been set yet — settlement's separate
+/// `validate_fee_against_governance` check only tightens the ceiling
+/// further once governance configures one, it never has to be the thing
+/// that first caps a per-fee value.
 pub const MAX_FEE_BPS: u32 = 5_000;
 
 /// Approximate number of Soroban ledgers closed per day, given the 5-second

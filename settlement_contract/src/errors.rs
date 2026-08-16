@@ -16,8 +16,8 @@ pub enum SettlementError {
     /// `set_settlement_rule`, `store_payment_reference`, `calculate_fee_split`,
     /// and `unregister_merchant` when the merchant is missing.
     MerchantMissing = 5,
-    /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
-    /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
+    /// Either fee BPS value is below `MIN_FEE_BPS` (5) or above `MAX_FEE_BPS`
+    /// (5 000), or their sum exceeds `BPS_DENOMINATOR` (10 000).
     /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 6,
     // Code 7 is intentionally reserved (formerly `InvalidAmount`).
