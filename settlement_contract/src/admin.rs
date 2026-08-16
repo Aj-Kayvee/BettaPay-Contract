@@ -1,11 +1,9 @@
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{
-    contractimpl, panic_with_error, symbol_short, Address, BytesN, Env, Symbol, Vec,
-};
+use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 
 use bettapay_common::{
     constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
-    events::PendingRecovery,
+    events::{self, AdminTransferred, PendingRecovery},
     storage::{self, CommonDataKey},
 };
 
@@ -118,12 +116,7 @@ impl SettlementContract {
             env.storage()
                 .instance()
                 .set(&CommonDataKey::PendingRecovery, &pending);
-            // Settlement re-uses the same `(recovery, new_admin, execute_after)`
-            // payload shape it had before the refactor. The topic name is the same.
-            env.events().publish(
-                (Symbol::new(&env, "recovery_initiated"),),
-                (recovery_address, new_admin, pending.execute_after),
-            );
+            events::emit_recovery_initiated(&env, &recovery_address, &new_admin, pending.execute_after);
         }
 
         pub fn cancel_recovery(env: Env, signers: Vec<Address>) {
@@ -139,8 +132,7 @@ impl SettlementContract {
             env.storage()
                 .instance()
                 .remove(&CommonDataKey::PendingRecovery);
-            env.events()
-                .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
+            events::emit_recovery_cancelled(&env, &admin);
         }
 
         pub fn execute_recovery(env: Env) {
@@ -149,14 +141,20 @@ impl SettlementContract {
                 panic_with_error!(&env, SettlementError::RecoveryDelayActive);
             }
 
+            let old_admin = read_admin(&env);
             let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
             env.storage().instance().set(&DataKey::Admin, &new_admins);
             env.storage().instance().set(&DataKey::Threshold, &1u32);
             env.storage()
                 .instance()
                 .remove(&CommonDataKey::PendingRecovery);
-            env.events()
-                .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
+            events::emit_recovery_executed(
+                &env,
+                &AdminTransferred {
+                    old_admin,
+                    new_admin: pending.new_admin.clone(),
+                },
+            );
         }
 
         pub fn transfer_admin(
@@ -168,13 +166,19 @@ impl SettlementContract {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             validate_admins_and_threshold(&env, &new_admins, new_threshold);
 
+            let old_admin = read_admin(&env);
             env.storage().instance().set(&DataKey::Admin, &new_admins);
             env.storage()
                 .instance()
                 .set(&DataKey::Threshold, &new_threshold);
             let primary_new_admin = new_admins.get(0).unwrap();
-            env.events()
-                .publish((symbol_short!("admin"),), primary_new_admin);
+            events::emit_admin_transferred(
+                &env,
+                &AdminTransferred {
+                    old_admin,
+                    new_admin: primary_new_admin,
+                },
+            );
         }
 
         pub fn change_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
@@ -212,16 +216,14 @@ impl SettlementContract {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             let admin = signers.get(0).unwrap();
             env.storage().instance().set(&DataKey::Paused, &true);
-            env.events()
-                .publish((symbol_short!("pause"),), (admin, true));
+            events::emit_paused(&env, &admin);
         }
 
         pub fn unpause(env: Env, signers: Vec<Address>) {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             let admin = signers.get(0).unwrap();
             env.storage().instance().set(&DataKey::Paused, &false);
-            env.events()
-                .publish((symbol_short!("unpause"),), (admin, false));
+            events::emit_unpaused(&env, &admin);
         }
 
         pub fn is_paused(env: Env) -> bool {
@@ -349,8 +351,7 @@ impl SettlementContract {
             env.storage()
                 .instance()
                 .remove(&CommonDataKey::PendingRecovery);
-            env.events()
-                .publish((Symbol::new(env, "recovery_cancelled"),), admin);
+            events::emit_recovery_cancelled(env, &admin);
         }
 
         fn _transfer_admin(env: &Env, new_admin: Address) {
@@ -365,7 +366,13 @@ impl SettlementContract {
                 panic_with_error!(env, SettlementError::InvalidAdmin);
             }
             env.storage().instance().set(&DataKey::Admin, &new_admin);
-            env.events().publish((symbol_short!("admin"),), new_admin);
+            events::emit_admin_transferred(
+                env,
+                &AdminTransferred {
+                    old_admin: admin,
+                    new_admin,
+                },
+            );
         }
 
         fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {

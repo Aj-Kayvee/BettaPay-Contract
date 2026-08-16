@@ -119,3 +119,48 @@ pub fn emit_recovery_executed(env: &Env, payload: &AdminTransferred) {
         payload.clone(),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Map, TryFromVal, TryIntoVal, Val};
+
+    /// The canonical payload shapes must keep their field names stable: an
+    /// indexer decodes these structs by field name, so renaming a field would
+    /// silently change the event's data shape for every consumer (issue #518).
+    #[test]
+    fn admin_transferred_payload_shape_is_canonical() {
+        let env = Env::default();
+        let old_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let payload = AdminTransferred {
+            old_admin: old_admin.clone(),
+            new_admin: new_admin.clone(),
+        };
+
+        let val: Val = payload.try_into_val(&env).unwrap();
+        let fields: Map<Symbol, Val> = Map::try_from_val(&env, &val).unwrap();
+
+        assert!(fields.contains_key(Symbol::new(&env, "old_admin")));
+        assert!(fields.contains_key(Symbol::new(&env, "new_admin")));
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[test]
+    fn pending_recovery_payload_shape_is_canonical() {
+        let env = Env::default();
+        let new_admin = Address::generate(&env);
+        let payload = PendingRecovery {
+            new_admin,
+            execute_after: 123,
+        };
+
+        let val: Val = payload.try_into_val(&env).unwrap();
+        let fields: Map<Symbol, Val> = Map::try_from_val(&env, &val).unwrap();
+
+        assert!(fields.contains_key(Symbol::new(&env, "new_admin")));
+        assert!(fields.contains_key(Symbol::new(&env, "execute_after")));
+        assert_eq!(fields.len(), 2);
+    }
+}
