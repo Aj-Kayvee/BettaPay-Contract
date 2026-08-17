@@ -17,8 +17,8 @@ pub enum SettlementError {
     NotInitialized = 2,
     /// The caller does not match the stored admin address.
     Unauthorized = 3,
-    /// The fee BPS values exceed 10 000 (`BPS_DENOMINATOR`) or their sum
-    /// exceeds 10 000, or either value is below `MIN_FEE_BPS` (5).
+    /// Either fee BPS value is below `MIN_FEE_BPS` (5) or above `MAX_FEE_BPS`
+    /// (5 000), or their sum exceeds `BPS_DENOMINATOR` (10 000).
     /// Raised by `set_settlement_rule` and `set_default_rule`.
     InvalidFeeBps = 4,
     /// The contract is paused. Most state‑mutating operations are blocked.
@@ -44,12 +44,7 @@ pub enum SettlementError {
     /// The target merchant address is not registered. Raised by
     /// `set_settlement_rule`, `store_payment_reference`, `calculate_fee_split`,
     /// and `unregister_merchant` when the merchant is missing.
-    MerchantMissing = 5,
-    /// Either fee BPS value is below `MIN_FEE_BPS` (5) or above `MAX_FEE_BPS`
-    /// (5 000), or their sum exceeds `BPS_DENOMINATOR` (10 000).
-    /// Raised by `set_settlement_rule` and `set_default_rule`.
-    InvalidFeeBps = 6,
-    // Code 7 is intentionally reserved (formerly `InvalidAmount`).
+    MerchantMissing = 302,
     /// `store_payment_reference` was called with a 32‑byte reference that
     /// already exists in storage.
     DuplicatePaymentReference = 303,

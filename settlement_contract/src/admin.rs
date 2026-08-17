@@ -3,7 +3,7 @@ use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, 
 
 use bettapay_common::{
     constants::{BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
-    events::PendingRecovery,
+    events::{self, AdminTransferred, PendingRecovery},
     storage::{self, CommonDataKey},
 };
 

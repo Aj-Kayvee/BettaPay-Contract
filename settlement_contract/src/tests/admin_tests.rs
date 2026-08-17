@@ -259,7 +259,7 @@ fn set_default_rule_rejected_when_paused() {
 // solely on `validate_fee_against_governance` (which is a no-op with no
 // governance config set) to keep per-fee values below 100%.
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn set_settlement_rule_rejects_platform_fee_above_max_fee_bps() {
     let (_env, client, admins, merchant) = setup();
     client.register_merchant(&admins, &merchant);
@@ -274,7 +274,7 @@ fn set_settlement_rule_rejects_platform_fee_above_max_fee_bps() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn set_settlement_rule_rejects_network_fee_above_max_fee_bps() {
     let (_env, client, admins, merchant) = setup();
     client.register_merchant(&admins, &merchant);
@@ -303,7 +303,7 @@ fn set_settlement_rule_accepts_fee_at_max_fee_bps_ceiling() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn set_default_rule_rejects_fee_above_max_fee_bps() {
     let (_env, client, admins, _merchant) = setup();
 
