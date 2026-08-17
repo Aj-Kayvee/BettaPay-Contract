@@ -3,9 +3,10 @@
 
 use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol};
+use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal};
 
 use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
+use bettapay_common::events::AdminTransferred;
 
 use super::{register_governance, setup};
 
@@ -97,6 +98,7 @@ fn transfer_admin_rejected_for_non_admin() {
 #[test]
 fn emits_event_on_admin_transfer() {
     let (env, client, admins, _merchant) = setup();
+    let old_admin = admins.get(0).unwrap();
     let new_admin = Address::generate(&env);
 
     let before = env.events().all().len();
@@ -116,9 +118,12 @@ fn emits_event_on_admin_transfer() {
     assert_eq!(topics.len(), 1);
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "admin")
+        Symbol::new(&env, "admin_transferred")
     );
-    assert_eq!(Address::from_val(&env, &data), new_admin);
+
+    let payload: AdminTransferred = AdminTransferred::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.old_admin, old_admin);
+    assert_eq!(payload.new_admin, new_admin);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +139,40 @@ fn pause_flag_changes_state() {
     assert!(client.is_paused());
     client.unpause(&admins);
     assert!(!client.is_paused());
+}
+
+// Issue #518: pause/unpause must publish the canonical `paused`/`unpaused`
+// topics with the shared `(admin, bool)` payload shape.
+#[test]
+fn emits_canonical_pause_and_unpause_events() {
+    let (env, client, admins, _merchant) = setup();
+    let admin = admins.get(0).unwrap();
+
+    client.pause(&admins);
+    let events = env.events().all();
+    let event = events.last().unwrap();
+    let (contract_id, topics, data) = event;
+    assert_eq!(contract_id, client.address);
+    assert_eq!(
+        Symbol::from_val(&env, &topics.get(0).unwrap()),
+        Symbol::new(&env, "paused")
+    );
+    let (event_admin, flag): (Address, bool) = FromVal::from_val(&env, &data);
+    assert_eq!(event_admin, admin);
+    assert!(flag);
+
+    client.unpause(&admins);
+    let events = env.events().all();
+    let event = events.last().unwrap();
+    let (contract_id, topics, data) = event;
+    assert_eq!(contract_id, client.address);
+    assert_eq!(
+        Symbol::from_val(&env, &topics.get(0).unwrap()),
+        Symbol::new(&env, "unpaused")
+    );
+    let (event_admin, flag): (Address, bool) = FromVal::from_val(&env, &data);
+    assert_eq!(event_admin, admin);
+    assert!(!flag);
 }
 
 // Issue #73: verify non-admins cannot pause the settlement contract
