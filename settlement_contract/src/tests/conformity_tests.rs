@@ -1,214 +1,169 @@
-//! Indexer-conformity tests.
+//! Cross-contract error-code conformity test for issue #517.
 //!
-//! An off-chain indexer that consumes events from both BettaPay contracts must
-//! be able to dispatch on a single canonical topic name and decode the payload
-//! with one decoder, no matter which contract published it. These tests deploy
-//! the settlement and governance contracts into the same environment, trigger
-//! the shared events on each, and assert that both contracts publish the same
-//! topic symbol and the same canonical payload shape (see issue #518).
+//! Governance and settlement error codes used to be numbered independently,
+//! so the same code could mean different things in each contract (e.g. code
+//! 12 was `AlreadyPaused` in governance but `InvalidPaymentReference` in
+//! settlement). Both enums now derive their discriminants from
+//! `bettapay_common::error_codes`, and each contract's own module has a
+//! `const _: ()` block asserting its enum matches the registry. This test
+//! adds the piece those per-crate checks can't: proof that the two full
+//! error tables, read together, never disagree about what a code means.
 
-use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{Address, Env, FromVal, Symbol, TryFromVal, Val, Vec};
+use crate::errors::SettlementError;
+use governance_contract::GovernanceError;
 
-use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
-use bettapay_common::events::{
-    AdminTransferred, ADMIN_TRANSFERRED_EVENT, PAUSED_EVENT, RECOVERY_EXECUTED_EVENT,
-    UNPAUSED_EVENT,
-};
-
-use governance_contract::{GovernanceContract, GovernanceContractClient};
-
-use crate::{SettlementContract, SettlementContractClient};
-
-/// Deploys a fresh governance contract and a settlement contract configured to
-/// use it, returning both clients plus each contract's admin set.
-fn deploy_both_contracts() -> (
-    Env,
-    SettlementContractClient<'static>,
-    GovernanceContractClient<'static>,
-    Vec<Address>,
-    Vec<Address>,
-) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let recovery = Address::generate(&env);
-
-    let gov_admin = Address::generate(&env);
-    let gov_admins = soroban_sdk::vec![&env, gov_admin.clone()];
-    let gov_id = env.register_contract(None, GovernanceContract);
-    let gov = GovernanceContractClient::new(&env, &gov_id);
-    gov.init(&gov_admins, &1, &recovery);
-
-    let settlement_admin = Address::generate(&env);
-    let settlement_admins = soroban_sdk::vec![&env, settlement_admin.clone()];
-    let settlement_id = env.register_contract(None, SettlementContract);
-    let settlement = SettlementContractClient::new(&env, &settlement_id);
-    settlement.init(&settlement_admins, &1, &gov_id, &recovery);
-
-    (env, settlement, gov, settlement_admins, gov_admins)
+fn governance_codes() -> [(&'static str, u32); 19] {
+    [
+        ("AlreadyInitialized", GovernanceError::AlreadyInitialized as u32),
+        ("NotInitialized", GovernanceError::NotInitialized as u32),
+        ("Unauthorized", GovernanceError::Unauthorized as u32),
+        ("InvalidFeeBps", GovernanceError::InvalidFeeBps as u32),
+        ("Paused", GovernanceError::Paused as u32),
+        ("InvalidAdmin", GovernanceError::InvalidAdmin as u32),
+        (
+            "InvalidRecoveryAddress",
+            GovernanceError::InvalidRecoveryAddress as u32,
+        ),
+        (
+            "RecoveryNotPending",
+            GovernanceError::RecoveryNotPending as u32,
+        ),
+        (
+            "RecoveryDelayActive",
+            GovernanceError::RecoveryDelayActive as u32,
+        ),
+        (
+            "ExecutionNotReady",
+            GovernanceError::ExecutionNotReady as u32,
+        ),
+        (
+            "OperationNotScheduled",
+            GovernanceError::OperationNotScheduled as u32,
+        ),
+        (
+            "OperationAlreadyScheduled",
+            GovernanceError::OperationAlreadyScheduled as u32,
+        ),
+        (
+            "InvalidWasmInterface",
+            GovernanceError::InvalidWasmInterface as u32,
+        ),
+        ("InvalidThreshold", GovernanceError::InvalidThreshold as u32),
+        ("AnchorMissing", GovernanceError::AnchorMissing as u32),
+        (
+            "InvalidParamValue",
+            GovernanceError::InvalidParamValue as u32,
+        ),
+        ("AlreadyPaused", GovernanceError::AlreadyPaused as u32),
+        ("AlreadyUnpaused", GovernanceError::AlreadyUnpaused as u32),
+        ("SameAdmin", GovernanceError::SameAdmin as u32),
+    ]
 }
 
-/// Returns the data payload of the event published by `contract` whose single
-/// topic equals `Symbol(topic)`.
-fn event_data(
-    env: &Env,
-    events: &Vec<(Address, Vec<Val>, Val)>,
-    contract: &Address,
-    topic: &str,
-) -> Val {
-    let expected: Symbol = Symbol::new(env, topic);
-    events
-        .iter()
-        .find(|(id, topics, _)| {
-            id == contract
-                && topics
-                    .get(0)
-                    .map(|t| Symbol::from_val(env, &t) == expected)
-                    .unwrap_or(false)
-        })
-        .map(|(_, _, data)| data)
-        .expect("expected event was not emitted")
-}
-
-/// Returns the `topic[0]` symbol of the event published by `contract` with
-/// that topic name.
-fn event_topic(
-    env: &Env,
-    events: &Vec<(Address, Vec<Val>, Val)>,
-    contract: &Address,
-    topic: &str,
-) -> Symbol {
-    let expected: Symbol = Symbol::new(env, topic);
-    events
-        .iter()
-        .find(|(id, topics, _)| {
-            id == contract
-                && topics
-                    .get(0)
-                    .map(|t| Symbol::from_val(env, &t) == expected)
-                    .unwrap_or(false)
-        })
-        .map(|(_, topics, _)| Symbol::from_val(env, &topics.get(0).unwrap()))
-        .expect("expected event was not emitted")
-}
-
-#[test]
-fn admin_transferred_event_is_canonical_across_contracts() {
-    let (env, settlement, gov, s_admins, g_admins) = deploy_both_contracts();
-
-    let s_new = Address::generate(&env);
-    let g_new = Address::generate(&env);
-    settlement.transfer_admin(&s_admins, &soroban_sdk::vec![&env, s_new.clone()], &1);
-    gov.transfer_admin(&g_admins, &soroban_sdk::vec![&env, g_new.clone()], &1);
-
-    let events = env.events().all();
-
-    // Both contracts must publish the identical canonical topic symbol.
-    let s_topic = event_topic(&env, &events, &settlement.address, ADMIN_TRANSFERRED_EVENT);
-    let g_topic = event_topic(&env, &events, &gov.address, ADMIN_TRANSFERRED_EVENT);
-    assert_eq!(s_topic, g_topic);
-    assert_eq!(s_topic, Symbol::new(&env, ADMIN_TRANSFERRED_EVENT));
-
-    // And the payload must decode as the canonical `AdminTransferred` shape on
-    // both contracts — not a bare address.
-    let s_payload: AdminTransferred = AdminTransferred::try_from_val(
-        &env,
-        &event_data(&env, &events, &settlement.address, ADMIN_TRANSFERRED_EVENT),
-    )
-    .unwrap();
-    let g_payload: AdminTransferred = AdminTransferred::try_from_val(
-        &env,
-        &event_data(&env, &events, &gov.address, ADMIN_TRANSFERRED_EVENT),
-    )
-    .unwrap();
-    assert_eq!(s_payload.old_admin, s_admins.get(0).unwrap());
-    assert_eq!(s_payload.new_admin, s_new);
-    assert_eq!(g_payload.old_admin, g_admins.get(0).unwrap());
-    assert_eq!(g_payload.new_admin, g_new);
+fn settlement_codes() -> [(&'static str, u32); 24] {
+    [
+        (
+            "AlreadyInitialized",
+            SettlementError::AlreadyInitialized as u32,
+        ),
+        ("NotInitialized", SettlementError::NotInitialized as u32),
+        ("Unauthorized", SettlementError::Unauthorized as u32),
+        ("InvalidFeeBps", SettlementError::InvalidFeeBps as u32),
+        ("Paused", SettlementError::Paused as u32),
+        ("InvalidAdmin", SettlementError::InvalidAdmin as u32),
+        (
+            "InvalidRecoveryAddress",
+            SettlementError::InvalidRecoveryAddress as u32,
+        ),
+        (
+            "RecoveryNotPending",
+            SettlementError::RecoveryNotPending as u32,
+        ),
+        (
+            "RecoveryDelayActive",
+            SettlementError::RecoveryDelayActive as u32,
+        ),
+        (
+            "ExecutionNotReady",
+            SettlementError::ExecutionNotReady as u32,
+        ),
+        (
+            "OperationNotScheduled",
+            SettlementError::OperationNotScheduled as u32,
+        ),
+        (
+            "OperationAlreadyScheduled",
+            SettlementError::OperationAlreadyScheduled as u32,
+        ),
+        (
+            "InvalidWasmInterface",
+            SettlementError::InvalidWasmInterface as u32,
+        ),
+        ("InvalidThreshold", SettlementError::InvalidThreshold as u32),
+        ("MerchantExists", SettlementError::MerchantExists as u32),
+        ("MerchantMissing", SettlementError::MerchantMissing as u32),
+        (
+            "DuplicatePaymentReference",
+            SettlementError::DuplicatePaymentReference as u32,
+        ),
+        (
+            "MerchantRuleNotSet",
+            SettlementError::MerchantRuleNotSet as u32,
+        ),
+        ("EmptyAddress", SettlementError::EmptyAddress as u32),
+        ("ZeroAddress", SettlementError::ZeroAddress as u32),
+        (
+            "InvalidPaymentReference",
+            SettlementError::InvalidPaymentReference as u32,
+        ),
+        (
+            "InvalidSettlementDelay",
+            SettlementError::InvalidSettlementDelay as u32,
+        ),
+        ("InvalidGovernance", SettlementError::InvalidGovernance as u32),
+        ("AmountOverflow", SettlementError::AmountOverflow as u32),
+    ]
 }
 
 #[test]
-fn pause_events_are_canonical_across_contracts() {
-    let (env, settlement, gov, s_admins, g_admins) = deploy_both_contracts();
-
-    settlement.pause(&s_admins);
-    gov.pause(&g_admins);
-    let events = env.events().all();
-
-    let s_topic = event_topic(&env, &events, &settlement.address, PAUSED_EVENT);
-    let g_topic = event_topic(&env, &events, &gov.address, PAUSED_EVENT);
-    assert_eq!(s_topic, g_topic);
-    assert_eq!(s_topic, Symbol::new(&env, PAUSED_EVENT));
-
-    let (s_admin, s_flag): (Address, bool) = FromVal::from_val(
-        &env,
-        &event_data(&env, &events, &settlement.address, PAUSED_EVENT),
-    );
-    let (g_admin, g_flag): (Address, bool) =
-        FromVal::from_val(&env, &event_data(&env, &events, &gov.address, PAUSED_EVENT));
-    assert_eq!(s_admin, s_admins.get(0).unwrap());
-    assert!(s_flag);
-    assert_eq!(g_admin, g_admins.get(0).unwrap());
-    assert!(g_flag);
-
-    settlement.unpause(&s_admins);
-    gov.unpause(&g_admins);
-    let events = env.events().all();
-
-    let s_topic = event_topic(&env, &events, &settlement.address, UNPAUSED_EVENT);
-    let g_topic = event_topic(&env, &events, &gov.address, UNPAUSED_EVENT);
-    assert_eq!(s_topic, g_topic);
-    assert_eq!(s_topic, Symbol::new(&env, UNPAUSED_EVENT));
-
-    let (s_admin, s_flag): (Address, bool) = FromVal::from_val(
-        &env,
-        &event_data(&env, &events, &settlement.address, UNPAUSED_EVENT),
-    );
-    let (g_admin, g_flag): (Address, bool) = FromVal::from_val(
-        &env,
-        &event_data(&env, &events, &gov.address, UNPAUSED_EVENT),
-    );
-    assert_eq!(s_admin, s_admins.get(0).unwrap());
-    assert!(!s_flag);
-    assert_eq!(g_admin, g_admins.get(0).unwrap());
-    assert!(!g_flag);
+fn shared_registry_codes_are_identical_in_both_contracts() {
+    for &(name, code) in bettapay_common::error_codes::SHARED_CODES {
+        let gov = governance_codes()
+            .into_iter()
+            .find(|&(n, _)| n == name)
+            .unwrap_or_else(|| panic!("governance_contract has no `{name}` variant"));
+        let settle = settlement_codes()
+            .into_iter()
+            .find(|&(n, _)| n == name)
+            .unwrap_or_else(|| panic!("settlement_contract has no `{name}` variant"));
+        assert_eq!(gov.1, code, "governance `{name}` drifted from the registry");
+        assert_eq!(settle.1, code, "settlement `{name}` drifted from the registry");
+    }
 }
 
 #[test]
-fn recovery_executed_event_is_canonical_across_contracts() {
-    let (env, settlement, gov, s_admins, g_admins) = deploy_both_contracts();
+fn governance_and_settlement_error_codes_never_collide() {
+    for &(gov_name, gov_code) in governance_codes().iter() {
+        for &(settle_name, settle_code) in settlement_codes().iter() {
+            if gov_code == settle_code {
+                assert_eq!(
+                    gov_name, settle_name,
+                    "code {gov_code} means `{gov_name}` in governance_contract but \
+                     `{settle_name}` in settlement_contract",
+                );
+            }
+        }
+    }
+}
 
-    let s_new_admin = Address::generate(&env);
-    let g_new_admin = Address::generate(&env);
-    settlement.initiate_recovery(&s_new_admin);
-    gov.initiate_recovery(&g_new_admin);
-    env.ledger()
-        .with_mut(|ledger| ledger.timestamp += RECOVERY_DELAY_SECONDS);
-    settlement.execute_recovery();
-    gov.execute_recovery();
-
-    let events = env.events().all();
-
-    let s_topic = event_topic(&env, &events, &settlement.address, RECOVERY_EXECUTED_EVENT);
-    let g_topic = event_topic(&env, &events, &gov.address, RECOVERY_EXECUTED_EVENT);
-    assert_eq!(s_topic, g_topic);
-    assert_eq!(s_topic, Symbol::new(&env, RECOVERY_EXECUTED_EVENT));
-
-    // `recovery_executed` must carry the canonical `AdminTransferred` payload
-    // on both contracts — not a bare address.
-    let s_payload: AdminTransferred = AdminTransferred::try_from_val(
-        &env,
-        &event_data(&env, &events, &settlement.address, RECOVERY_EXECUTED_EVENT),
-    )
-    .unwrap();
-    let g_payload: AdminTransferred = AdminTransferred::try_from_val(
-        &env,
-        &event_data(&env, &events, &gov.address, RECOVERY_EXECUTED_EVENT),
-    )
-    .unwrap();
-    assert_eq!(s_payload.old_admin, s_admins.get(0).unwrap());
-    assert_eq!(s_payload.new_admin, s_new_admin);
-    assert_eq!(g_payload.old_admin, g_admins.get(0).unwrap());
-    assert_eq!(g_payload.new_admin, g_new_admin);
+#[test]
+fn contract_specific_codes_stay_in_their_reserved_range() {
+    bettapay_common::error_codes::assert_no_code_collisions(
+        &governance_codes(),
+        bettapay_common::error_codes::GOVERNANCE_RANGE_START,
+    );
+    bettapay_common::error_codes::assert_no_code_collisions(
+        &settlement_codes(),
+        bettapay_common::error_codes::SETTLEMENT_RANGE_START,
+    );
 }

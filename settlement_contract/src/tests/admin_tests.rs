@@ -71,7 +71,7 @@ fn transfer_admin_updates_admin_address() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #21)")]
+#[should_panic(expected = "Error(Contract, #306)")]
 fn rejects_zero_address_admin_transfer() {
     let (env, client, admins, _merchant) = setup();
     let zero_address = Address::from_string(&soroban_sdk::String::from_str(
@@ -185,7 +185,7 @@ fn pause_rejected_for_non_admin() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn merchant_registration_blocked_when_paused() {
     let (_env, client, admins, merchant) = setup();
     client.pause(&admins);
@@ -195,7 +195,7 @@ fn merchant_registration_blocked_when_paused() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn set_settlement_rule_rejected_when_paused() {
     let (_env, client, admins, merchant) = setup();
     client.register_merchant(&admins, &merchant);
@@ -214,7 +214,7 @@ fn set_settlement_rule_rejected_when_paused() {
 
 // Issue #350: the merchant-specific settlement rule must not be cleared while paused.
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn clear_settlement_rule_rejected_when_paused() {
     let (_env, client, admins, merchant) = setup();
     client.register_merchant(&admins, &merchant);
@@ -235,7 +235,7 @@ fn clear_settlement_rule_rejected_when_paused() {
 
 // Issue #231: the global default settlement rule must not be updated while paused.
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
     client.pause(&admins);
@@ -395,3 +395,27 @@ fn update_governance_stores_validated_address() {
 
     assert_eq!(client.get_governance(), new_governance);
 }
+
+#[test]
+fn bps_newtype_conversions_and_arithmetic_helpers_work() {
+    let bps = Bps::new(250);
+    assert_eq!(bps.value(), 250);
+    assert_eq!(bps.as_i128(), 250i128);
+
+    let fee_amount = bps.calculate_fee_ceil(10_000);
+    assert_eq!(fee_amount, 250);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 150,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 0,
+        auto_settle: false,
+    };
+    assert_eq!(rule.platform_bps(), Bps::new(150));
+    assert_eq!(rule.network_bps(), Bps::new(50));
+
+    let from_u32: Bps = 100u32.into();
+    let to_u32: u32 = from_u32.into();
+    assert_eq!(to_u32, 100);
+}
+
