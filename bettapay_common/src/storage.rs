@@ -85,12 +85,22 @@ pub fn set_paused(env: &Env, paused: bool) {
 /// to reject this on admin transfer, merchant registration, etc., so the
 /// comparison lives here and callers translate a `true` result into their own
 /// `Invalid*` error variant.
+///
+/// This is called on every admin/merchant/governance write, so it avoids
+/// encoding `address` to a strkey `String` (`Address::to_string`) just to
+/// compare it: that direction of the conversion scales with every call and
+/// is the more expensive one, since it makes the host re-derive and allocate
+/// a fresh base-32 `String` object for the *caller-supplied* address each
+/// time. Instead it builds the zero `Address` once and compares the two
+/// `Address` values directly, which is a cheap host object comparison
+/// (`Address`'s `PartialEq` delegates to the host's `obj_cmp`) with no
+/// per-call `String` allocation on the hot path.
 pub fn is_zero_address(env: &Env, address: &Address) -> bool {
-    let zero_address = String::from_str(
+    let zero_address = Address::from_string(&String::from_str(
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
-    address.to_string() == zero_address
+    ));
+    address == &zero_address
 }
 
 /// Bump the instance-storage TTL using the policy defined in

@@ -1131,7 +1131,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "pause"
+                "symbol": "paused"
               }
             ],
             "data": {
