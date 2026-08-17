@@ -141,11 +141,14 @@
 //!
 //! | Event symbol | Trigger |
 //! |---|---|
+//! | `initialized` | Contract initialized |
 //! | `contract_upgraded` | Wasm upgrade succeeded |
-//! | `admin` | Admin transfer completed |
+//! | `admin_transferred` | Admin transfer completed |
+//! | `threshold_changed` | Multisig threshold changed |
 //! | `paused` | Contract paused |
 //! | `unpaused` | Contract unpaused |
-//! | `sys_param` | System parameter updated |
+//! | `recovery_initiated` / `recovery_cancelled` / `recovery_executed` | Admin-recovery lifecycle |
+//! | `sys_param_updated` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
 //! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
 //! | `anchor_removed` | Anchor removed for an asset |
@@ -418,9 +421,9 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .remove(&CommonDataKey::PendingRecovery);
-        env.events().publish(
-            (Symbol::new(&env, "recovery_executed"),),
-            AdminTransferred {
+        events::emit_recovery_executed(
+            &env,
+            &AdminTransferred {
                 old_admin,
                 new_admin: pending.new_admin.clone(),
             },
@@ -453,9 +456,9 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &new_threshold);
-        env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            AdminTransferred {
+        events::emit_admin_transferred(
+            &env,
+            &AdminTransferred {
                 old_admin: old_admins.get(0).unwrap(),
                 new_admin: new_admins.get(0).unwrap(),
             },
@@ -487,8 +490,7 @@ impl GovernanceContract {
         }
         let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((Symbol::new(&env, "paused"),), (admin, true));
+        events::emit_paused(&env, &admin);
     }
 
     pub fn unpause(env: Env, signers: Vec<Address>) {
@@ -498,8 +500,7 @@ impl GovernanceContract {
         }
         let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((Symbol::new(&env, "unpaused"),), (admin, false));
+        events::emit_unpaused(&env, &admin);
     }
 
     pub fn is_paused(env: Env) -> bool {
