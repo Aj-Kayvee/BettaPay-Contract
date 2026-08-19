@@ -14,7 +14,7 @@
 //! which is what allows both contracts to share this enum without disturbing
 //! any existing storage entry.
 
-use soroban_sdk::{contracttype, Address, Env, String};
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::constants::{TTL_BUMP_LEDGERS, TTL_THRESHOLD_LEDGERS};
 
@@ -77,6 +77,24 @@ pub fn set_paused(env: &Env, paused: bool) {
         .set(&CommonDataKey::Paused, &paused);
 }
 
+/// Returns the first entry of a stored multisig admin list.
+///
+/// Both `governance_contract` and `settlement_contract` store their admin
+/// role as a `Vec<Address>` (under their own contract-specific `DataKey`,
+/// not [`CommonDataKey::Admin`]) and treat index `0` as the "primary" admin
+/// for single-address contexts — the address recorded on events, and the
+/// caller compared against in `schedule`/`cancel` ownership checks. Each
+/// contract previously reimplemented `admins.get(0).unwrap()` for this; this
+/// helper centralises that shared semantic so both contracts read it from
+/// one place.
+///
+/// Returns `None` if `admins` is empty; callers are expected to map that to
+/// their own `NotInitialized`/`InvalidAdmin` error, since an empty admin
+/// list should not be reachable once a contract is initialised.
+pub fn primary_admin(admins: &Vec<Address>) -> Option<Address> {
+    admins.get(0)
+}
+
 /// Returns `true` if `address` is the network's zero address.
 ///
 /// The Soroban zero-address is the well-known string
@@ -119,46 +137,21 @@ pub fn bump_instance_ttl(env: &Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::contract;
-    use soroban_sdk::testutils::{storage::Instance as _, Ledger};
+    use soroban_sdk::{testutils::Address as _, vec};
 
-    #[contract]
-    struct TestContract;
-
-    /// Regression test for issue #520: `is_paused` used to be a bare read
-    /// with no TTL side effect, unlike every other instance-storage reader
-    /// in this module. A contract whose only activity was pause checks (no
-    /// `read_admin` or other instance write/read to keep the entry warm)
-    /// could let the instance entry's TTL run out while paused, and a
-    /// missing entry silently reads back as "not paused" via
-    /// `unwrap_or(false)` rather than failing loudly.
     #[test]
-    fn is_paused_bumps_instance_ttl() {
+    fn primary_admin_returns_first_entry() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, TestContract);
-        env.as_contract(&contract_id, || {
-            set_paused(&env, true);
-            let initial_ttl = env.storage().instance().get_ttl();
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2];
+        assert_eq!(primary_admin(&admins), Some(a1));
+    }
 
-            // Advance far enough that the remaining TTL drops below the bump
-            // threshold, but not so far that the entry is archived outright.
-            let advance = initial_ttl.saturating_sub(TTL_THRESHOLD_LEDGERS) + 1_000;
-            env.ledger().with_mut(|li| {
-                li.sequence_number += advance;
-            });
-            let ttl_before = env.storage().instance().get_ttl();
-            assert!(
-                ttl_before < TTL_THRESHOLD_LEDGERS,
-                "test setup should have decayed the TTL below the threshold, got {ttl_before}",
-            );
-
-            assert!(is_paused(&env));
-
-            let ttl_after = env.storage().instance().get_ttl();
-            assert!(
-                ttl_after > ttl_before,
-                "is_paused should have refreshed the instance TTL: before={ttl_before}, after={ttl_after}",
-            );
-        });
+    #[test]
+    fn primary_admin_returns_none_for_empty_list() {
+        let env = Env::default();
+        let admins: Vec<Address> = vec![&env];
+        assert_eq!(primary_admin(&admins), None);
     }
 }

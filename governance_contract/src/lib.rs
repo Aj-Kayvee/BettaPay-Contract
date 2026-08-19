@@ -450,7 +450,7 @@ impl GovernanceContract {
         }
 
         let old_admins = read_admins(&env);
-        let old_admin = old_admins.get(0).unwrap();
+        let old_admin = storage::primary_admin(&old_admins).unwrap();
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
         env.storage().instance().set(&DataKey::Admin, &new_admins);
         env.storage().instance().set(&DataKey::Threshold, &1u32);
@@ -492,10 +492,10 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &new_threshold);
-        events::emit_admin_transferred(
-            &env,
-            &AdminTransferred {
-                old_admin: old_admins.get(0).unwrap(),
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin: storage::primary_admin(&old_admins).unwrap(),
                 new_admin: new_admins.get(0).unwrap(),
             },
         );
