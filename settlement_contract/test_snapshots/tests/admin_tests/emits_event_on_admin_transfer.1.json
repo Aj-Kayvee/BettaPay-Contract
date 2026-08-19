@@ -449,7 +449,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "admin"
+                "symbol": "admin_transferred"
               }
             ],
             "data": {

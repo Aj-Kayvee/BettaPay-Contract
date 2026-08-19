@@ -116,7 +116,7 @@ fn emits_event_on_admin_transfer() {
     assert_eq!(topics.len(), 1);
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "admin")
+        Symbol::new(&env, bettapay_common::events::ADMIN_TRANSFERRED_EVENT)
     );
     assert_eq!(Address::from_val(&env, &data), new_admin);
 }
@@ -134,6 +134,39 @@ fn pause_flag_changes_state() {
     assert!(client.is_paused());
     client.unpause(&admins);
     assert!(!client.is_paused());
+}
+
+// Issue #550: settlement previously emitted non-canonical "pause"/"unpause"/
+// "admin" topics while governance used "paused"/"unpaused"/
+// "admin_transferred", so an indexer subscribed to the canonical names
+// missed every settlement event. This pins settlement's topics to
+// `bettapay_common::events`' shared constants so it fails again if either
+// contract's topic strings drift apart.
+#[test]
+fn pause_unpause_and_admin_transfer_use_canonical_topics() {
+    let (env, client, admins, _merchant) = setup();
+
+    client.pause(&admins);
+    let (_, pause_topics, _) = env.events().all().last().unwrap();
+    assert_eq!(
+        Symbol::from_val(&env, &pause_topics.get(0).unwrap()),
+        Symbol::new(&env, bettapay_common::events::PAUSED_EVENT)
+    );
+
+    client.unpause(&admins);
+    let (_, unpause_topics, _) = env.events().all().last().unwrap();
+    assert_eq!(
+        Symbol::from_val(&env, &unpause_topics.get(0).unwrap()),
+        Symbol::new(&env, bettapay_common::events::UNPAUSED_EVENT)
+    );
+
+    let new_admin = Address::generate(&env);
+    client.transfer_admin(&admins, &soroban_sdk::vec![&env, new_admin], &1);
+    let (_, transfer_topics, _) = env.events().all().last().unwrap();
+    assert_eq!(
+        Symbol::from_val(&env, &transfer_topics.get(0).unwrap()),
+        Symbol::new(&env, bettapay_common::events::ADMIN_TRANSFERRED_EVENT)
+    );
 }
 
 // Issue #73: verify non-admins cannot pause the settlement contract

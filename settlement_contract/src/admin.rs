@@ -1,11 +1,11 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contractimpl, panic_with_error, symbol_short, Address, BytesN, Env, Symbol, Vec,
+    contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec,
 };
 
 use bettapay_common::{
     constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
-    events::PendingRecovery,
+    events::{self, PendingRecovery},
     storage::{self, CommonDataKey},
 };
 
@@ -173,8 +173,10 @@ impl SettlementContract {
                 .instance()
                 .set(&DataKey::Threshold, &new_threshold);
             let primary_new_admin = new_admins.get(0).unwrap();
-            env.events()
-                .publish((symbol_short!("admin"),), primary_new_admin);
+            env.events().publish(
+                (Symbol::new(&env, events::ADMIN_TRANSFERRED_EVENT),),
+                primary_new_admin,
+            );
         }
 
         pub fn change_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
@@ -212,16 +214,20 @@ impl SettlementContract {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             let admin = signers.get(0).unwrap();
             env.storage().instance().set(&DataKey::Paused, &true);
-            env.events()
-                .publish((symbol_short!("pause"),), (admin, true));
+            env.events().publish(
+                (Symbol::new(&env, events::PAUSED_EVENT),),
+                (admin, true),
+            );
         }
 
         pub fn unpause(env: Env, signers: Vec<Address>) {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             let admin = signers.get(0).unwrap();
             env.storage().instance().set(&DataKey::Paused, &false);
-            env.events()
-                .publish((symbol_short!("unpause"),), (admin, false));
+            env.events().publish(
+                (Symbol::new(&env, events::UNPAUSED_EVENT),),
+                (admin, false),
+            );
         }
 
         pub fn is_paused(env: Env) -> bool {
@@ -365,7 +371,10 @@ impl SettlementContract {
                 panic_with_error!(env, SettlementError::InvalidAdmin);
             }
             env.storage().instance().set(&DataKey::Admin, &new_admin);
-            env.events().publish((symbol_short!("admin"),), new_admin);
+            env.events().publish(
+                (Symbol::new(env, events::ADMIN_TRANSFERRED_EVENT),),
+                new_admin,
+            );
         }
 
         fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
