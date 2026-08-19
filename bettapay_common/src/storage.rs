@@ -2,15 +2,17 @@
 //!
 //! Each contract keeps its own private `DataKey` enum for keys that are
 //! contract-specific (e.g. settlement's `Merchant(Address)` or governance's
-//! `Anchor(Address)`). The keys that are semantically shared — the admin
-//! address, the pause flag, the recovery address, and the pending recovery
-//! operation — live in [`CommonDataKey`] so every contract reads and writes
-//! them in exactly the same shape.
+//! `Anchor(Address)`). The keys that are semantically shared — the pause
+//! flag, the recovery address, and the pending recovery operation — live in
+//! [`CommonDataKey`] so every contract reads and writes them in exactly the
+//! same shape. The admin role is *not* one of these: both contracts store it
+//! as a multisig `Vec<Address>` under their own `DataKey::Admin`, so there is
+//! no single-`Address` shape for this crate to own.
 //!
 //! The on-chain SCVal encoding of a Soroban `#[contracttype]` enum is based on
 //! the variant name only; the parent enum's Rust name is not part of the
-//! encoding. So a value written under `governance_contract::DataKey::Admin`
-//! reads back identically through `bettapay_common::CommonDataKey::Admin`,
+//! encoding. So a value written under `governance_contract::DataKey::Paused`
+//! reads back identically through `bettapay_common::CommonDataKey::Paused`,
 //! which is what allows both contracts to share this enum without disturbing
 //! any existing storage entry.
 
@@ -26,8 +28,6 @@ use crate::constants::{TTL_BUMP_LEDGERS, TTL_THRESHOLD_LEDGERS};
 #[derive(Clone)]
 #[contracttype]
 pub enum CommonDataKey {
-    /// Contract admin `Address` (instance storage).
-    Admin,
     /// Recovery `Address` authorised to initiate the recovery flow
     /// (instance storage).
     RecoveryAddress,
@@ -37,17 +37,6 @@ pub enum CommonDataKey {
     /// Pause-flag `bool` controlling whether mutating operations are blocked
     /// (instance storage).
     Paused,
-}
-
-/// Returns the stored admin `Address` and refreshes the instance TTL while
-/// reading.
-///
-/// Returns `None` if the contract has not been initialised yet; the caller is
-/// expected to map a missing admin to its own `NotInitialized` error variant
-/// so the panic message keeps the contract's specific error code.
-pub fn read_admin(env: &Env) -> Option<Address> {
-    bump_instance_ttl(env);
-    env.storage().instance().get(&CommonDataKey::Admin)
 }
 
 /// Returns `true` if the contract is currently paused.

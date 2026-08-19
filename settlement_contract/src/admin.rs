@@ -215,14 +215,14 @@ impl SettlementContract {
         pub fn pause(env: Env, signers: Vec<Address>) {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             let admin = signers.get(0).unwrap();
-            env.storage().instance().set(&DataKey::Paused, &true);
+            storage::set_paused(&env, true);
             events::emit_paused(&env, &admin);
         }
 
         pub fn unpause(env: Env, signers: Vec<Address>) {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             let admin = signers.get(0).unwrap();
-            env.storage().instance().set(&DataKey::Paused, &false);
+            storage::set_paused(&env, false);
             events::emit_unpaused(&env, &admin);
         }
 
