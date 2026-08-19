@@ -3,9 +3,10 @@
 
 use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol};
+use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal};
 
 use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
+use bettapay_common::events::AdminTransferred;
 
 use super::{register_governance, setup};
 
@@ -70,7 +71,7 @@ fn transfer_admin_updates_admin_address() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #21)")]
+#[should_panic(expected = "Error(Contract, #306)")]
 fn rejects_zero_address_admin_transfer() {
     let (env, client, admins, _merchant) = setup();
     let zero_address = Address::from_string(&soroban_sdk::String::from_str(
@@ -97,6 +98,7 @@ fn transfer_admin_rejected_for_non_admin() {
 #[test]
 fn emits_event_on_admin_transfer() {
     let (env, client, admins, _merchant) = setup();
+    let old_admin = admins.get(0).unwrap();
     let new_admin = Address::generate(&env);
 
     let before = env.events().all().len();
@@ -116,9 +118,12 @@ fn emits_event_on_admin_transfer() {
     assert_eq!(topics.len(), 1);
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "admin")
+        Symbol::new(&env, "admin_transferred")
     );
-    assert_eq!(Address::from_val(&env, &data), new_admin);
+
+    let payload: AdminTransferred = AdminTransferred::try_from_val(&env, &data).unwrap();
+    assert_eq!(payload.old_admin, old_admin);
+    assert_eq!(payload.new_admin, new_admin);
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +141,40 @@ fn pause_flag_changes_state() {
     assert!(!client.is_paused());
 }
 
+// Issue #518: pause/unpause must publish the canonical `paused`/`unpaused`
+// topics with the shared `(admin, bool)` payload shape.
+#[test]
+fn emits_canonical_pause_and_unpause_events() {
+    let (env, client, admins, _merchant) = setup();
+    let admin = admins.get(0).unwrap();
+
+    client.pause(&admins);
+    let events = env.events().all();
+    let event = events.last().unwrap();
+    let (contract_id, topics, data) = event;
+    assert_eq!(contract_id, client.address);
+    assert_eq!(
+        Symbol::from_val(&env, &topics.get(0).unwrap()),
+        Symbol::new(&env, "paused")
+    );
+    let (event_admin, flag): (Address, bool) = FromVal::from_val(&env, &data);
+    assert_eq!(event_admin, admin);
+    assert!(flag);
+
+    client.unpause(&admins);
+    let events = env.events().all();
+    let event = events.last().unwrap();
+    let (contract_id, topics, data) = event;
+    assert_eq!(contract_id, client.address);
+    assert_eq!(
+        Symbol::from_val(&env, &topics.get(0).unwrap()),
+        Symbol::new(&env, "unpaused")
+    );
+    let (event_admin, flag): (Address, bool) = FromVal::from_val(&env, &data);
+    assert_eq!(event_admin, admin);
+    assert!(!flag);
+}
+
 // Issue #73: verify non-admins cannot pause the settlement contract
 #[test]
 #[should_panic(expected = "Error(Contract, #3)")]
@@ -146,7 +185,7 @@ fn pause_rejected_for_non_admin() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn merchant_registration_blocked_when_paused() {
     let (_env, client, admins, merchant) = setup();
     client.pause(&admins);
@@ -156,7 +195,7 @@ fn merchant_registration_blocked_when_paused() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn set_settlement_rule_rejected_when_paused() {
     let (_env, client, admins, merchant) = setup();
     client.register_merchant(&admins, &merchant);
@@ -175,7 +214,7 @@ fn set_settlement_rule_rejected_when_paused() {
 
 // Issue #350: the merchant-specific settlement rule must not be cleared while paused.
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn clear_settlement_rule_rejected_when_paused() {
     let (_env, client, admins, merchant) = setup();
     client.register_merchant(&admins, &merchant);
@@ -196,7 +235,7 @@ fn clear_settlement_rule_rejected_when_paused() {
 
 // Issue #231: the global default settlement rule must not be updated while paused.
 #[test]
-#[should_panic(expected = "Error(Contract, #9)")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
     client.pause(&admins);
@@ -290,3 +329,27 @@ fn update_governance_stores_validated_address() {
 
     assert_eq!(client.get_governance(), new_governance);
 }
+
+#[test]
+fn bps_newtype_conversions_and_arithmetic_helpers_work() {
+    let bps = Bps::new(250);
+    assert_eq!(bps.value(), 250);
+    assert_eq!(bps.as_i128(), 250i128);
+
+    let fee_amount = bps.calculate_fee_ceil(10_000);
+    assert_eq!(fee_amount, 250);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 150,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 0,
+        auto_settle: false,
+    };
+    assert_eq!(rule.platform_bps(), Bps::new(150));
+    assert_eq!(rule.network_bps(), Bps::new(50));
+
+    let from_u32: Bps = 100u32.into();
+    let to_u32: u32 = from_u32.into();
+    assert_eq!(to_u32, 100);
+}
+

@@ -52,11 +52,18 @@ pub fn read_admin(env: &Env) -> Option<Address> {
 
 /// Returns `true` if the contract is currently paused.
 ///
-/// This is a cheap read: it just inspects the instance flag without bumping
-/// TTL or cloning data. Mutating operations that gate on pause state should
-/// still keep the flag warm via [`bump_instance_ttl`] if they care about the
-/// entry's lifetime.
+/// Bumps the instance TTL on every call, the same way [`read_admin`] does.
+/// Soroban's instance storage is a single ledger entry shared by every
+/// instance key (`Admin`, `Paused`, `RecoveryAddress`, ...), so in practice
+/// any instance read on a live contract keeps the whole entry — including
+/// the pause flag — warm. But a contract path that checks `is_paused`
+/// without also touching another instance key (or one that's simply quiet
+/// for a long stretch while paused) had no guaranteed keep-alive of its
+/// own, and a missing entry silently reads back as `unpaused` via
+/// `unwrap_or(false)` below rather than failing loudly. Bumping here removes
+/// that dependency on call order.
 pub fn is_paused(env: &Env) -> bool {
+    bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&CommonDataKey::Paused)
@@ -96,12 +103,22 @@ pub fn primary_admin(admins: &Vec<Address>) -> Option<Address> {
 /// to reject this on admin transfer, merchant registration, etc., so the
 /// comparison lives here and callers translate a `true` result into their own
 /// `Invalid*` error variant.
+///
+/// This is called on every admin/merchant/governance write, so it avoids
+/// encoding `address` to a strkey `String` (`Address::to_string`) just to
+/// compare it: that direction of the conversion scales with every call and
+/// is the more expensive one, since it makes the host re-derive and allocate
+/// a fresh base-32 `String` object for the *caller-supplied* address each
+/// time. Instead it builds the zero `Address` once and compares the two
+/// `Address` values directly, which is a cheap host object comparison
+/// (`Address`'s `PartialEq` delegates to the host's `obj_cmp`) with no
+/// per-call `String` allocation on the hot path.
 pub fn is_zero_address(env: &Env, address: &Address) -> bool {
-    let zero_address = String::from_str(
+    let zero_address = Address::from_string(&String::from_str(
         env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
-    address.to_string() == zero_address
+    ));
+    address == &zero_address
 }
 
 /// Bump the instance-storage TTL using the policy defined in
