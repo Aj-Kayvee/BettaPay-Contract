@@ -5,7 +5,7 @@ use soroban_sdk::{
 
 use bettapay_common::{
     constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
-    events::{self, PendingRecovery},
+    events::{self, AdminTransferred, PendingRecovery},
     storage::{self, CommonDataKey},
 };
 
@@ -174,9 +174,12 @@ impl SettlementContract {
                 .instance()
                 .set(&DataKey::Threshold, &new_threshold);
             let primary_new_admin = new_admins.get(0).unwrap();
-            env.events().publish(
-                (Symbol::new(&env, events::ADMIN_TRANSFERRED_EVENT),),
-                primary_new_admin,
+            events::emit_admin_transferred(
+                &env,
+                &AdminTransferred {
+                    old_admin,
+                    new_admin: primary_new_admin,
+                },
             );
         }
 
@@ -371,9 +374,12 @@ impl SettlementContract {
                 panic_with_error!(env, SettlementError::InvalidAdmin);
             }
             env.storage().instance().set(&DataKey::Admin, &new_admin);
-            env.events().publish(
-                (Symbol::new(env, events::ADMIN_TRANSFERRED_EVENT),),
-                new_admin,
+            events::emit_admin_transferred(
+                env,
+                &AdminTransferred {
+                    old_admin: admin,
+                    new_admin,
+                },
             );
         }
 
