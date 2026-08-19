@@ -1,6 +1,9 @@
 use soroban_sdk::{contractimpl, panic_with_error, Address, Env, Symbol, Vec};
 
-use bettapay_common::constants::{BPS_DENOMINATOR, MIN_FEE_BPS};
+use bettapay_common::{
+    constants::{BPS_DENOMINATOR, MIN_FEE_BPS},
+    events,
+};
 
 use crate::errors::SettlementError;
 use crate::storage::{
@@ -57,7 +60,7 @@ impl SettlementContract {
                 .extend_ttl(&key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
 
             env.events().publish(
-                (Symbol::new(&env, "settlement_rule_updated"), merchant),
+                (Symbol::new(&env, events::SETTLEMENT_RULE_UPDATED_EVENT), merchant),
                 (admin, prev, rule),
             );
         }
@@ -79,7 +82,7 @@ impl SettlementContract {
             let fallback = read_rule_or_default(&env, merchant.clone());
 
             env.events().publish(
-                (Symbol::new(&env, "settlement_rule_cleared"), merchant),
+                (Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT), merchant),
                 (admin, removed, fallback),
             );
         }
@@ -118,7 +121,7 @@ impl SettlementContract {
             );
 
             env.events().publish(
-                (Symbol::new(&env, "default_rule_updated"),),
+                (Symbol::new(&env, events::DEFAULT_RULE_UPDATED_EVENT),),
                 (admin, prev, new_rule),
             );
         }

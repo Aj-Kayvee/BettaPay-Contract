@@ -29,11 +29,23 @@ pub struct PendingRecovery {
     pub execute_after: u64,
 }
 
-// Event-name strings.
+// Event-topic registry.
 //
 // Soroban `Symbol`s are limited to 32 bytes; every value here comfortably
-// fits. Centralising them in this crate keeps the topic name identical across
-// the contracts.
+// fits. This is the single place every topic name used by any BettaPay
+// contract is defined — governance_contract and settlement_contract must
+// not construct a topic `Symbol` from an inline string literal; they import
+// the constant from here instead. That is what lets an off-chain indexer
+// trust a topic name meaning the same thing regardless of which contract
+// emitted it, and is enforced by each contract's conformity tests (see
+// `governance_contract::tests` and
+// `settlement_contract::tests::event_topic_conformity_tests`).
+//
+// Constants are grouped below by which contract(s) emit them. A topic only
+// moves to the "shared" group once two contracts emit it for the same
+// underlying event; a name coincidence alone is not enough.
+
+// --- Shared: emitted by both governance_contract and settlement_contract ---
 
 /// Topic emitted when the admin role is transferred (also reused by
 /// `execute_recovery`).
@@ -53,6 +65,69 @@ pub const RECOVERY_CANCELLED_EVENT: &str = "recovery_cancelled";
 
 /// Topic emitted when a recovery operation has been executed.
 pub const RECOVERY_EXECUTED_EVENT: &str = "recovery_executed";
+
+/// Topic emitted when a contract's Wasm executable is upgraded.
+pub const CONTRACT_UPGRADED_EVENT: &str = "contract_upgraded";
+
+/// Topic emitted when the multisig admin threshold changes.
+pub const THRESHOLD_CHANGED_EVENT: &str = "threshold_changed";
+
+// --- governance_contract only ---
+
+/// Topic emitted once, when `GovernanceContract::init` completes.
+pub const INITIALIZED_EVENT: &str = "initialized";
+
+/// Topic emitted when an arbitrary system parameter is updated.
+pub const SYS_PARAM_UPDATED_EVENT: &str = "sys_param_updated";
+
+/// Topic emitted when the protocol fee configuration changes.
+pub const FEE_CONFIG_UPDATED_EVENT: &str = "fee_config_updated";
+
+/// Topic emitted when an asset's trusted anchor is created or replaced.
+pub const ANCHOR_UPSERTED_EVENT: &str = "anchor_upserted";
+
+/// Topic emitted when an asset's trusted anchor is removed.
+pub const ANCHOR_REMOVED_EVENT: &str = "anchor_removed";
+
+// --- settlement_contract only ---
+
+/// Topic emitted when `update_governance` stores a new governance address.
+pub const GOVERNANCE_UPDATED_EVENT: &str = "governance_updated";
+
+/// Topic emitted when a merchant is registered.
+pub const MERCHANT_REGISTERED_EVENT: &str = "merchant_registered";
+
+/// Topic emitted when a merchant is unregistered.
+pub const MERCHANT_UNREGISTERED_EVENT: &str = "merchant_unregistered";
+
+/// Topic emitted when a merchant-specific settlement rule is set or replaced.
+pub const SETTLEMENT_RULE_UPDATED_EVENT: &str = "settlement_rule_updated";
+
+/// Topic emitted when a merchant-specific settlement rule is cleared —
+/// either explicitly via `clear_settlement_rule`, or as a side effect of
+/// `unregister_merchant` removing a merchant that had one set.
+pub const SETTLEMENT_RULE_CLEARED_EVENT: &str = "settlement_rule_cleared";
+
+/// Topic emitted when the global default settlement rule is updated.
+pub const DEFAULT_RULE_UPDATED_EVENT: &str = "default_rule_updated";
+
+/// Topic emitted when `read_rule_or_default` falls all the way through to
+/// the hardcoded bootstrap rule because no merchant, default, or governance
+/// rule is configured yet.
+pub const BOOTSTRAP_FALLBACK_EVENT: &str = "bootstrap_fallback";
+
+/// Topic emitted when a payment reference is stored via
+/// `store_payment_reference`.
+pub const PAYMENT_STORED_EVENT: &str = "payment_stored";
+
+/// Topic emitted when a timelocked administrative operation is scheduled.
+pub const OP_SCHEDULED_EVENT: &str = "op_scheduled";
+
+/// Topic emitted when a scheduled administrative operation executes.
+pub const OP_EXECUTED_EVENT: &str = "op_executed";
+
+/// Topic emitted when a scheduled administrative operation is cancelled.
+pub const OP_CANCELLED_EVENT: &str = "op_cancelled";
 
 /// Emits the `admin_transferred` event with the structured
 /// [`AdminTransferred`] payload.

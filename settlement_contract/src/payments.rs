@@ -1,6 +1,6 @@
 use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 
-use bettapay_common::constants::BPS_DENOMINATOR;
+use bettapay_common::{constants::BPS_DENOMINATOR, events};
 
 use crate::errors::SettlementError;
 use crate::storage::{assert_not_paused, is_merchant_registered_internal, read_rule_or_default};
@@ -123,7 +123,7 @@ impl SettlementContract {
 
             env.events().publish(
                 (
-                    Symbol::new(&env, "payment_stored"),
+                    Symbol::new(&env, events::PAYMENT_STORED_EVENT),
                     merchant.clone(),
                     reference.clone(),
                 ),

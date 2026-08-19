@@ -20,7 +20,7 @@ fn upsert_anchor_emits_anchor_upserted_event() {
     assert_eq!(topics.len(), 2);
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "anchor_upserted")
+        Symbol::new(&env, bettapay_common::events::ANCHOR_UPSERTED_EVENT)
     );
     assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), asset);
 
@@ -47,7 +47,7 @@ fn remove_anchor_emits_anchor_removed_event() {
     assert_eq!(topics.len(), 2);
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "anchor_removed")
+        Symbol::new(&env, bettapay_common::events::ANCHOR_REMOVED_EVENT)
     );
     assert_eq!(Address::from_val(&env, &topics.get(1).unwrap()), asset);
 }

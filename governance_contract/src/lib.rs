@@ -365,7 +365,7 @@ impl GovernanceContract {
             .set(&CommonDataKey::RecoveryAddress, &recovery_address);
         let admin = admins.get(0).unwrap();
         env.events()
-            .publish((Symbol::new(&env, "initialized"),), admin);
+            .publish((Symbol::new(&env, events::INITIALIZED_EVENT),), admin);
     }
 
     pub fn is_initialized(env: Env) -> bool {
@@ -407,7 +407,7 @@ impl GovernanceContract {
         let caller = signers.get(0).unwrap();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), event_wasm_hash),
+            (Symbol::new(&env, events::CONTRACT_UPGRADED_EVENT), event_wasm_hash),
             caller,
         );
     }
@@ -514,7 +514,7 @@ impl GovernanceContract {
             .instance()
             .set(&DataKey::Threshold, &new_threshold);
         env.events().publish(
-            (Symbol::new(&env, "threshold_changed"),),
+            (Symbol::new(&env, events::THRESHOLD_CHANGED_EVENT),),
             (current_threshold, new_threshold),
         );
     }
@@ -566,7 +566,7 @@ impl GovernanceContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "sys_param_updated"), key),
+            (Symbol::new(&env, events::SYS_PARAM_UPDATED_EVENT), key),
             (admin, previous_value, value),
         );
     }
@@ -610,7 +610,7 @@ impl GovernanceContract {
             .persistent()
             .extend_ttl(&key, FEE_TTL_THRESHOLD, FEE_TTL_BUMP);
         env.events()
-            .publish((Symbol::new(&env, "fee_config_updated"),), (admin, config));
+            .publish((Symbol::new(&env, events::FEE_CONFIG_UPDATED_EVENT),), (admin, config));
     }
 
     pub fn get_fee_config(env: Env) -> Option<FeeConfig> {
@@ -634,7 +634,7 @@ impl GovernanceContract {
         env.storage().persistent().set(&key, &anchor.clone());
         env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
         env.events().publish(
-            (Symbol::new(&env, "anchor_upserted"), asset),
+            (Symbol::new(&env, events::ANCHOR_UPSERTED_EVENT), asset),
             (old_anchor, anchor),
         );
     }
@@ -650,7 +650,7 @@ impl GovernanceContract {
 
         env.storage().persistent().remove(&key);
         env.events()
-            .publish((Symbol::new(&env, "anchor_removed"), asset), ());
+            .publish((Symbol::new(&env, events::ANCHOR_REMOVED_EVENT), asset), ());
     }
 
     pub fn get_anchor(env: Env, asset: Address) -> Option<Address> {
@@ -944,7 +944,7 @@ mod tests {
         assert_eq!(topics.len(), 1);
         assert_eq!(
             Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "fee_config_updated")
+            Symbol::new(&env, events::FEE_CONFIG_UPDATED_EVENT)
         );
 
         let (event_admin, event_cfg): (Address, FeeConfig) = FromVal::from_val(&env, &data);
@@ -1080,7 +1080,7 @@ mod tests {
         let (_contract_id, topics, data) = events.get(0).unwrap();
         assert_eq!(
             Symbol::from_val(&env, &topics.get(0).unwrap()),
-            Symbol::new(&env, "initialized")
+            Symbol::new(&env, events::INITIALIZED_EVENT)
         );
         assert_eq!(Address::from_val(&env, &data), admin);
     }

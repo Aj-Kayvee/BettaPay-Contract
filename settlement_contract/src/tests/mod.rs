@@ -6,6 +6,7 @@
 
 pub mod admin_tests;
 pub mod conformity_tests;
+pub mod event_topic_conformity_tests;
 
 use crate::*;
 use soroban_sdk::testutils::Address as _;
