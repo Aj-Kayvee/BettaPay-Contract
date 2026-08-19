@@ -141,11 +141,14 @@
 //!
 //! | Event symbol | Trigger |
 //! |---|---|
+//! | `initialized` | Contract initialized |
 //! | `contract_upgraded` | Wasm upgrade succeeded |
-//! | `admin` | Admin transfer completed |
+//! | `admin_transferred` | Admin transfer completed |
+//! | `threshold_changed` | Multisig threshold changed |
 //! | `paused` | Contract paused |
 //! | `unpaused` | Contract unpaused |
-//! | `sys_param` | System parameter updated |
+//! | `recovery_initiated` / `recovery_cancelled` / `recovery_executed` | Admin-recovery lifecycle |
+//! | `sys_param_updated` | System parameter updated |
 //! | `fee_config_updated` | Fee configuration changed |
 //! | `anchor_upserted` | Anchor created or replaced for an asset | Data: `(Option<Address> previous, Address current)` |
 //! | `anchor_removed` | Anchor removed for an asset |
@@ -166,6 +169,7 @@ use bettapay_common::{
         BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS, TTL_BUMP_LEDGERS,
         TTL_THRESHOLD_LEDGERS,
     },
+    error_codes,
     events::{self, AdminTransferred, PendingRecovery},
     storage::{self, CommonDataKey},
 };
@@ -234,6 +238,12 @@ enum DataKey {
     ScheduledOperation(BytesN<32>),
 }
 
+// Discriminants below are pinned to `bettapay_common::error_codes` so that a
+// numeric error code means the same thing in both contracts (issue #517).
+// Shared concepts use the registry's constant value directly; codes with no
+// settlement_contract equivalent are contract-specific and live in the
+// `200..=299` range reserved for this contract. `governance_error_codes_match_registry`
+// below fails the build if these literals ever drift from the registry.
 #[contracterror]
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[repr(u32)]
@@ -246,33 +256,62 @@ pub enum GovernanceError {
     Unauthorized = 3,
     /// The provided fee basis points are invalid or exceed the maximum limit.
     InvalidFeeBps = 4,
-    /// The anchor for the specified asset was not found.
-    AnchorMissing = 5,
     /// The contract is currently paused and the operation is not allowed.
-    Paused = 6,
+    Paused = 5,
     /// The provided admin address is invalid (e.g., zero address or same as current admin).
-    InvalidAdmin = 7,
-    InvalidParamValue = 8,
-    InvalidRecoveryAddress = 9,
-    RecoveryNotPending = 10,
-    RecoveryDelayActive = 11,
-    /// `pause` was called while the contract was already paused.
-    AlreadyPaused = 12,
-    /// `unpause` was called while the contract was already unpaused.
-    AlreadyUnpaused = 13,
+    InvalidAdmin = 6,
+    InvalidRecoveryAddress = 7,
+    RecoveryNotPending = 8,
+    RecoveryDelayActive = 9,
     /// The scheduled operation is not yet ready for execution.
-    ExecutionNotReady = 14,
+    ExecutionNotReady = 10,
     /// The operation has not been scheduled.
-    OperationNotScheduled = 15,
+    OperationNotScheduled = 11,
     /// The operation has already been scheduled.
-    OperationAlreadyScheduled = 16,
+    OperationAlreadyScheduled = 12,
     /// The deployed WASM does not implement the required interface.
-    InvalidWasmInterface = 17,
+    InvalidWasmInterface = 13,
     /// The provided multisig threshold is invalid.
-    InvalidThreshold = 18,
+    InvalidThreshold = 14,
+    /// The anchor for the specified asset was not found.
+    AnchorMissing = 200,
+    InvalidParamValue = 201,
+    /// `pause` was called while the contract was already paused.
+    AlreadyPaused = 202,
+    /// `unpause` was called while the contract was already unpaused.
+    AlreadyUnpaused = 203,
     /// The new admin set and threshold are identical to the current ones.
-    SameAdmin = 19,
+    SameAdmin = 204,
 }
+
+const _: () = {
+    assert!(GovernanceError::AlreadyInitialized as u32 == error_codes::ALREADY_INITIALIZED);
+    assert!(GovernanceError::NotInitialized as u32 == error_codes::NOT_INITIALIZED);
+    assert!(GovernanceError::Unauthorized as u32 == error_codes::UNAUTHORIZED);
+    assert!(GovernanceError::InvalidFeeBps as u32 == error_codes::INVALID_FEE_BPS);
+    assert!(GovernanceError::Paused as u32 == error_codes::PAUSED);
+    assert!(GovernanceError::InvalidAdmin as u32 == error_codes::INVALID_ADMIN);
+    assert!(
+        GovernanceError::InvalidRecoveryAddress as u32 == error_codes::INVALID_RECOVERY_ADDRESS
+    );
+    assert!(GovernanceError::RecoveryNotPending as u32 == error_codes::RECOVERY_NOT_PENDING);
+    assert!(GovernanceError::RecoveryDelayActive as u32 == error_codes::RECOVERY_DELAY_ACTIVE);
+    assert!(GovernanceError::ExecutionNotReady as u32 == error_codes::EXECUTION_NOT_READY);
+    assert!(
+        GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED
+    );
+    assert!(
+        GovernanceError::OperationAlreadyScheduled as u32
+            == error_codes::OPERATION_ALREADY_SCHEDULED
+    );
+    assert!(GovernanceError::InvalidWasmInterface as u32 == error_codes::INVALID_WASM_INTERFACE);
+    assert!(GovernanceError::InvalidThreshold as u32 == error_codes::INVALID_THRESHOLD);
+    assert!(GovernanceError::AnchorMissing as u32 >= error_codes::GOVERNANCE_RANGE_START);
+    assert!(GovernanceError::InvalidParamValue as u32 >= error_codes::GOVERNANCE_RANGE_START);
+    assert!(GovernanceError::AlreadyPaused as u32 >= error_codes::GOVERNANCE_RANGE_START);
+    assert!(GovernanceError::AlreadyUnpaused as u32 >= error_codes::GOVERNANCE_RANGE_START);
+    assert!(GovernanceError::SameAdmin as u32 >= error_codes::GOVERNANCE_RANGE_START);
+};
 
 #[contract]
 pub struct GovernanceContract;
@@ -418,9 +457,9 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .remove(&CommonDataKey::PendingRecovery);
-        env.events().publish(
-            (Symbol::new(&env, "recovery_executed"),),
-            AdminTransferred {
+        events::emit_recovery_executed(
+            &env,
+            &AdminTransferred {
                 old_admin,
                 new_admin: pending.new_admin.clone(),
             },
@@ -453,9 +492,9 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &new_threshold);
-        env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            AdminTransferred {
+        events::emit_admin_transferred(
+            &env,
+            &AdminTransferred {
                 old_admin: old_admins.get(0).unwrap(),
                 new_admin: new_admins.get(0).unwrap(),
             },
@@ -487,8 +526,7 @@ impl GovernanceContract {
         }
         let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((Symbol::new(&env, "paused"),), (admin, true));
+        events::emit_paused(&env, &admin);
     }
 
     pub fn unpause(env: Env, signers: Vec<Address>) {
@@ -498,8 +536,7 @@ impl GovernanceContract {
         }
         let admin = signers.get(0).unwrap();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events()
-            .publish((Symbol::new(&env, "unpaused"),), (admin, false));
+        events::emit_unpaused(&env, &admin);
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -818,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #18)")]
+    #[should_panic(expected = "Error(Contract, #14)")]
     fn governance_rejects_zero_threshold_init() {
         let env = Env::default();
         env.mock_all_auths();
@@ -830,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #7)")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn governance_rejects_zero_address_admin_transfer() {
         let (env, client, admins, _recovery) = setup();
         let zero_address = Address::from_string(&String::from_str(
@@ -842,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #19)")]
+    #[should_panic(expected = "Error(Contract, #204)")]
     fn rejects_same_admin_transfer() {
         let (_env, client, admins, _recovery) = setup();
         let threshold = client.get_threshold();

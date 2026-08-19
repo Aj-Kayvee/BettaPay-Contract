@@ -38,18 +38,26 @@
 //! the same conventions:
 //!
 //! - `topic[0]` is always the event name as a [`Symbol`], constructed via
-//!   [`Symbol::new`] (or [`symbol_short!`] when the name fits in nine bytes).
-//!   Indexers filter on this single topic to dispatch by event type.
+//!   [`Symbol::new`]. Indexers filter on this single topic to dispatch by
+//!   event type.
 //! - `topic[1..n]` carry the entity identifiers that scope the event —
 //!   typically an [`Address`] (merchant, asset, admin), but for some events
 //!   also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`, payment
 //!   reference on `payment_stored`). The exact shape of `topic[1..n]` is
 //!   fixed per event.
 //! - The **data payload** carries the values describing the state change.
-//!   Its shape is event-specific: a single value (`true` for `pause`,
-//!   `admin` for `merchant_registered`), a tuple (e.g.
-//!   `(admin, prev, rule)` for `settlement_rule_updated`), a typed struct
-//!   such as the `SettlementRule` emitted on `bootstrap_fallback`, or `()`.
+//!   Its shape is event-specific: a single value (`admin` for
+//!   `merchant_registered`), a tuple (e.g. `(admin, prev, rule)` for
+//!   `settlement_rule_updated`, or `(admin, true)` for `paused`), a typed
+//!   struct such as the `SettlementRule` emitted on `bootstrap_fallback` or
+//!   the shared [`bettapay_common::events::AdminTransferred`] payload on
+//!   `admin_transferred` / `recovery_executed`, or `()`.
+//!
+//! Events shared with the governance contract (`admin_transferred`, `paused`,
+//! `unpaused`, `recovery_initiated`, `recovery_cancelled`, `recovery_executed`,
+//! `threshold_changed`, `contract_upgraded`) use the canonical topic names and
+//! payload shapes defined in [`bettapay_common::events`] so an indexer can
+//! decode them identically no matter which contract published them.
 //! - Each entry point emits exactly the events tied to the state change it
 //!   performs; no two events emitted by the same call describe the same
 //!   logical change.
@@ -157,7 +165,7 @@ mod tests;
 use soroban_sdk::contract;
 
 pub use errors::SettlementError;
-pub use types::{FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
+pub use types::{Bps, FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
 
 pub(crate) const MIN_PAYMENT_AMOUNT: i128 = 100;
 pub(crate) const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;

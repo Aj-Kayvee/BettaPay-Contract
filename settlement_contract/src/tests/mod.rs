@@ -5,6 +5,7 @@
 //! test modules are declared here so Rust can discover them during `cargo test`.
 
 pub mod admin_tests;
+pub mod conformity_tests;
 
 use crate::*;
 use soroban_sdk::testutils::Address as _;

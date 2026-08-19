@@ -22,13 +22,15 @@ use crate::{
 /// a negative merchant payout as a known, documented outcome rather than a bug.
 fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
     let denom = BPS_DENOMINATOR as i128;
+    let platform_bps = rule.platform_bps();
+    let network_bps = rule.network_bps();
 
     // Guard against `amount * bps + (denom - 1)` overflowing i128 before it is attempted below,
     // so callers get a readable AmountOverflow error instead of a raw arithmetic-overflow panic.
     // The `denom - 1` term (the ceil-rounding adjustment) is subtracted from the budget up front
     // so the check stays exact at the boundary instead of leaving a narrow window where the
     // multiplication is "safe" but the following `+ denom - 1` still overflows.
-    let max_bps = core::cmp::max(rule.platform_fee_bps, rule.network_fee_bps) as i128;
+    let max_bps = core::cmp::max(platform_bps.as_i128(), network_bps.as_i128());
     if max_bps > 0 && amount > (i128::MAX - (denom - 1)) / max_bps {
         panic_with_error!(env, SettlementError::AmountOverflow);
     }
@@ -37,8 +39,8 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
     // Standard integer division (`/`) truncates fractions toward zero, causing precision loss and under-collecting fees.
     // To prevent fee under-collection, ceiling division is simulated by adding `BPS_DENOMINATOR - 1` to the numerator.
     // Edge case: For small amounts, ceil rounding can force fees to 1 unit even when the basis points represent a tiny fraction.
-    let platform_fee_amount = (amount * (rule.platform_fee_bps as i128) + denom - 1) / denom;
-    let network_fee_amount = (amount * (rule.network_fee_bps as i128) + denom - 1) / denom;
+    let platform_fee_amount = platform_bps.calculate_fee_ceil(amount);
+    let network_fee_amount = network_bps.calculate_fee_ceil(amount);
 
     // The merchant amount is calculated as the subtraction remainder of the gross amount minus all rounded-up fees.
     // This ensures the sum of the split amounts (platform fee + network fee + merchant share) always equals the gross amount.

@@ -1,4 +1,49 @@
+use bettapay_common::constants::BPS_DENOMINATOR;
 use soroban_sdk::{contracttype, Address, BytesN};
+
+/// A type-safe wrapper around basis points (`u32`).
+///
+/// Provides explicit conversion methods and fee arithmetic helpers to prevent
+/// ad-hoc inline casting (`as i128`) and potential truncation or calculation errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[contracttype]
+pub struct Bps(pub u32);
+
+impl Bps {
+    /// Constructs a new `Bps` instance.
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying `u32` basis point value.
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+
+    /// Converts basis points to `i128` for safe fee arithmetic.
+    pub const fn as_i128(self) -> i128 {
+        self.0 as i128
+    }
+
+    /// Calculates ceil-rounded fee amount for a given gross amount:
+    /// `ceil(amount * bps / BPS_DENOMINATOR) = (amount * bps + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR`.
+    pub fn calculate_fee_ceil(self, amount: i128) -> i128 {
+        let denom = BPS_DENOMINATOR as i128;
+        (amount * self.as_i128() + denom - 1) / denom
+    }
+}
+
+impl From<u32> for Bps {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Bps> for u32 {
+    fn from(bps: Bps) -> Self {
+        bps.0
+    }
+}
 
 /// Configuration governing how merchant payments are settled.
 ///
@@ -30,6 +75,19 @@ pub struct SettlementRule {
     /// requires manual or external triggering.
     pub auto_settle: bool,
 }
+
+impl SettlementRule {
+    /// Returns the platform fee as a typed `Bps` wrapper.
+    pub fn platform_bps(&self) -> Bps {
+        Bps::new(self.platform_fee_bps)
+    }
+
+    /// Returns the network fee as a typed `Bps` wrapper.
+    pub fn network_bps(&self) -> Bps {
+        Bps::new(self.network_fee_bps)
+    }
+}
+
 
 #[derive(Clone)]
 #[contracttype]

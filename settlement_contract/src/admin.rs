@@ -118,12 +118,7 @@ impl SettlementContract {
             env.storage()
                 .instance()
                 .set(&CommonDataKey::PendingRecovery, &pending);
-            // Settlement re-uses the same `(recovery, new_admin, execute_after)`
-            // payload shape it had before the refactor. The topic name is the same.
-            env.events().publish(
-                (Symbol::new(&env, "recovery_initiated"),),
-                (recovery_address, new_admin, pending.execute_after),
-            );
+            events::emit_recovery_initiated(&env, &recovery_address, &new_admin, pending.execute_after);
         }
 
         pub fn cancel_recovery(env: Env, signers: Vec<Address>) {
@@ -139,8 +134,7 @@ impl SettlementContract {
             env.storage()
                 .instance()
                 .remove(&CommonDataKey::PendingRecovery);
-            env.events()
-                .publish((Symbol::new(&env, "recovery_cancelled"),), admin);
+            events::emit_recovery_cancelled(&env, &admin);
         }
 
         pub fn execute_recovery(env: Env) {
@@ -149,14 +143,20 @@ impl SettlementContract {
                 panic_with_error!(&env, SettlementError::RecoveryDelayActive);
             }
 
+            let old_admin = read_admin(&env);
             let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
             env.storage().instance().set(&DataKey::Admin, &new_admins);
             env.storage().instance().set(&DataKey::Threshold, &1u32);
             env.storage()
                 .instance()
                 .remove(&CommonDataKey::PendingRecovery);
-            env.events()
-                .publish((Symbol::new(&env, "recovery_executed"),), pending.new_admin);
+            events::emit_recovery_executed(
+                &env,
+                &AdminTransferred {
+                    old_admin,
+                    new_admin: pending.new_admin.clone(),
+                },
+            );
         }
 
         pub fn transfer_admin(
@@ -168,6 +168,7 @@ impl SettlementContract {
             verify_admin_auth(&env, &signers, read_threshold(&env));
             validate_admins_and_threshold(&env, &new_admins, new_threshold);
 
+            let old_admin = read_admin(&env);
             env.storage().instance().set(&DataKey::Admin, &new_admins);
             env.storage()
                 .instance()
@@ -355,8 +356,7 @@ impl SettlementContract {
             env.storage()
                 .instance()
                 .remove(&CommonDataKey::PendingRecovery);
-            env.events()
-                .publish((Symbol::new(env, "recovery_cancelled"),), admin);
+            events::emit_recovery_cancelled(env, &admin);
         }
 
         fn _transfer_admin(env: &Env, new_admin: Address) {
