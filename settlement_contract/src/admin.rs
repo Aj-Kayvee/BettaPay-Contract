@@ -2,7 +2,7 @@ use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 
 use bettapay_common::{
-    constants::{BPS_DENOMINATOR, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
+    constants::{BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
     events::{self, AdminTransferred, PendingRecovery},
     storage::{self, CommonDataKey},
 };
@@ -448,6 +448,9 @@ impl SettlementContract {
             if rule.platform_fee_bps < MIN_FEE_BPS || rule.network_fee_bps < MIN_FEE_BPS {
                 panic_with_error!(env, SettlementError::InvalidFeeBps);
             }
+            if rule.platform_fee_bps > MAX_FEE_BPS || rule.network_fee_bps > MAX_FEE_BPS {
+                panic_with_error!(env, SettlementError::InvalidFeeBps);
+            }
             if rule.platform_fee_bps + rule.network_fee_bps > BPS_DENOMINATOR {
                 panic_with_error!(env, SettlementError::InvalidFeeBps);
             }
@@ -503,6 +506,9 @@ impl SettlementContract {
                 panic_with_error!(env, SettlementError::InvalidFeeBps);
             }
             if new_rule.platform_fee_bps < MIN_FEE_BPS || new_rule.network_fee_bps < MIN_FEE_BPS {
+                panic_with_error!(env, SettlementError::InvalidFeeBps);
+            }
+            if new_rule.platform_fee_bps > MAX_FEE_BPS || new_rule.network_fee_bps > MAX_FEE_BPS {
                 panic_with_error!(env, SettlementError::InvalidFeeBps);
             }
             if new_rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
