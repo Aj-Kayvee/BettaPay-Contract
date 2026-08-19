@@ -525,7 +525,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::AlreadyPaused);
         }
         let admin = signers.get(0).unwrap();
-        env.storage().instance().set(&DataKey::Paused, &true);
+        storage::set_paused(&env, true);
         events::emit_paused(&env, &admin);
     }
 
@@ -535,7 +535,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
         }
         let admin = signers.get(0).unwrap();
-        env.storage().instance().set(&DataKey::Paused, &false);
+        storage::set_paused(&env, false);
         events::emit_unpaused(&env, &admin);
     }
 
@@ -670,9 +670,7 @@ impl GovernanceContract {
 }
 
 fn read_admins(env: &Env) -> Vec<Address> {
-    env.storage()
-        .instance()
-        .extend_ttl(TTL_THRESHOLD_LEDGERS, TTL_BUMP_LEDGERS);
+    storage::bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -1189,5 +1187,27 @@ mod tests {
         client.unpause(&admins);
         assert!(!client.is_paused());
         assert!(env.events().all().len() > before_unpause);
+    }
+
+    /// Pins `pause`/`unpause` to `bettapay_common::events`' canonical topic
+    /// constants rather than a locally inlined string, so this test fails if
+    /// either entry point stops routing through the shared emit helper.
+    #[test]
+    fn pause_and_unpause_emit_canonical_shared_topics() {
+        let (env, client, admins, _recovery) = setup();
+
+        client.pause(&admins);
+        let (_, pause_topics, _) = env.events().all().last().unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &pause_topics.get(0).unwrap()),
+            Symbol::new(&env, bettapay_common::events::PAUSED_EVENT)
+        );
+
+        client.unpause(&admins);
+        let (_, unpause_topics, _) = env.events().all().last().unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &unpause_topics.get(0).unwrap()),
+            Symbol::new(&env, bettapay_common::events::UNPAUSED_EVENT)
+        );
     }
 }
