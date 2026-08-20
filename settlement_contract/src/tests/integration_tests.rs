@@ -154,9 +154,7 @@ fn governance_fee_config_acts_as_ceiling_for_merchant_rules() {
         settlement_delay_ledger: 0,
         auto_settle: false,
     };
-    let result = std::panic::catch_unwind(|| {
-        settle_client.set_settlement_rule(&settle_admins, &merchant, &bad_rule);
-    });
+    let result = settle_client.try_set_settlement_rule(&settle_admins, &merchant, &bad_rule);
     assert!(result.is_err(), "rule exceeding governance ceiling must panic");
 
     let _ = env;
@@ -188,9 +186,7 @@ fn global_default_rule_respects_governance_fee_ceiling() {
         settlement_delay_ledger: 5,
         auto_settle: true,
     };
-    let result = std::panic::catch_unwind(|| {
-        settle_client.set_default_rule(&settle_admins, &bad_default);
-    });
+    let result = settle_client.try_set_default_rule(&settle_admins, &bad_default);
     assert!(result.is_err(), "default exceeding governance ceiling must panic");
 
     let _ = env;
@@ -390,7 +386,7 @@ fn recovery_events_follow_shared_convention_on_both_contracts() {
     let mut found_settle = false;
     for i in 0..events.len() {
         let (_contract, topics, data) = events.get(i).unwrap();
-        if topics.len() < 1 {
+        if topics.is_empty() {
             continue;
         }
         let sym = Symbol::from_val(&env, &topics.get(0).unwrap());
@@ -507,14 +503,10 @@ fn multisig_threshold_works_independently_on_both_contracts() {
     let one_signer = soroban_sdk::vec![&env, a1.clone()];
     let three_signers = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
 
-    let result_gov = std::panic::catch_unwind(|| {
-        gov_client.update_system_param(&one_signer, &Symbol::new(&env, "k"), &1);
-    });
+    let result_gov = gov_client.try_update_system_param(&one_signer, &Symbol::new(&env, "k"), &1);
     assert!(result_gov.is_err(), "governance rejects sub-threshold signers");
 
-    let result_settle = std::panic::catch_unwind(|| {
-        settle_client.pause(&one_signer);
-    });
+    let result_settle = settle_client.try_pause(&one_signer);
     assert!(result_settle.is_err(), "settlement rejects sub-threshold signers");
 
     // change_threshold requires threshold + 1 = 3 signers.
