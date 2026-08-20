@@ -12,7 +12,7 @@ use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal, Vec};
 
-use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
+use bettapay_common::constants::{BPS_DENOMINATOR, RECOVERY_DELAY_SECONDS};
 use bettapay_common::events::AdminTransferred;
 
 use governance_contract::{FeeConfig as GovFeeConfig, GovernanceContract, GovernanceContractClient};
@@ -622,4 +622,48 @@ fn full_lifecycle_configure_governance_then_process_payments() {
             amounts[i as usize]
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `MIN_PAYMENT_AMOUNT` floor — see the constant's doc comment for the rationale.
+// ---------------------------------------------------------------------------
+
+/// Locks the derivation `MIN_PAYMENT_AMOUNT == BPS_DENOMINATOR / 100`, so that
+/// changing either value without revisiting the ceil-rounding argument breaks
+/// the build rather than silently widening the fee distortion.
+#[test]
+fn min_payment_amount_is_derived_from_bps_denominator() {
+    assert_eq!(MIN_PAYMENT_AMOUNT, 100);
+    assert_eq!(MIN_PAYMENT_AMOUNT, (BPS_DENOMINATOR / 100) as i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn store_payment_reference_rejects_amount_below_min() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[9u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &(MIN_PAYMENT_AMOUNT - 1));
+}
+
+#[test]
+fn store_payment_reference_accepts_amount_at_min() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[10u8; 32]);
+    let split = settle_client.store_payment_reference(&merchant, &reference, &MIN_PAYMENT_AMOUNT);
+
+    assert_eq!(split.gross_amount, MIN_PAYMENT_AMOUNT);
+    assert_eq!(
+        split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+        split.gross_amount,
+        "fee legs plus merchant amount must reconstruct the gross amount"
+    );
+    // Bootstrap default rule applies (100 bps platform, 0 network): at the floor
+    // the platform fee is exactly 1 unit, with no ceil-rounding overshoot.
+    assert_eq!(split.platform_fee_amount, 1);
+    assert_eq!(split.network_fee_amount, 0);
+    assert_eq!(split.merchant_amount, 99);
 }
