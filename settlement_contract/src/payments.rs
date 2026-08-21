@@ -57,137 +57,136 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
 
 #[contractimpl]
 impl SettlementContract {
-        /// Store a payment reference for a merchant and calculate the fee split.
-        ///
-        /// # Panics
-        ///
-        /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
-        /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-        /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
-        /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
-        /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
-        /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
-        ///
-        /// ## Emitted Event: `payment_stored`
-        ///
-        /// **Topics**: `(Symbol("payment_stored"), Address merchant, BytesN<32> reference)`
-        /// **Data**: `()`
-        ///
-        /// The fee split (platform fee, network fee, merchant amount, gross amount)
-        /// is available on the `PaymentRecord` in this event's data; no separate
-        /// split event is emitted.
-        pub fn store_payment_reference(
-            env: Env,
-            merchant: Address,
-            reference: BytesN<32>,
-            amount: i128,
-        ) -> FeeSplit {
-            assert_not_paused(&env);
+    /// Store a payment reference for a merchant and calculate the fee split.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is paused.
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
+    /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
+    /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
+    /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
+    /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
+    ///
+    /// ## Emitted Event: `payment_stored`
+    ///
+    /// **Topics**: `(Symbol("payment_stored"), Address merchant, BytesN<32> reference)`
+    /// **Data**: `()`
+    ///
+    /// The fee split (platform fee, network fee, merchant amount, gross amount)
+    /// is available on the `PaymentRecord` in this event's data; no separate
+    /// split event is emitted.
+    pub fn store_payment_reference(
+        env: Env,
+        merchant: Address,
+        reference: BytesN<32>,
+        amount: i128,
+    ) -> FeeSplit {
+        assert_not_paused(&env);
 
-            if !is_merchant_registered_internal(&env, merchant.clone()) {
-                panic_with_error!(&env, SettlementError::MerchantMissing);
-            }
-            merchant.require_auth();
-            if reference == BytesN::from_array(&env, &[0; 32]) {
-                panic_with_error!(&env, SettlementError::InvalidPaymentReference);
-            }
-            if amount < MIN_PAYMENT_AMOUNT {
-                panic_with_error!(&env, SettlementError::AmountTooSmall);
-            }
-
-            let payment_key = DataKey::Payment(reference.clone());
-            if env.storage().persistent().has(&payment_key) {
-                panic_with_error!(&env, SettlementError::DuplicatePaymentReference);
-            }
-
-            let rule = read_rule_or_default(&env, merchant.clone());
-            let split = calculate_split(&env, amount, &rule);
-            let record = PaymentRecord {
-                amount,
-                platform_fee_amount: split.platform_fee_amount,
-                network_fee_amount: split.network_fee_amount,
-                merchant_amount: split.merchant_amount,
-                platform_fee_bps: rule.platform_fee_bps,
-                network_fee_bps: rule.network_fee_bps,
-                ledger: env.ledger().sequence(),
-                settlement_delay_ledger: rule.settlement_delay_ledger,
-                auto_settle: rule.auto_settle,
-            };
-
-            env.storage().persistent().set(&payment_key, &record);
-            env.storage().persistent().extend_ttl(
-                &payment_key,
-                PAYMENT_TTL_THRESHOLD,
-                PAYMENT_TTL_BUMP,
-            );
-
-            env.events().publish(
-                (
-                    Symbol::new(&env, "payment_stored"),
-                    merchant.clone(),
-                    reference.clone(),
-                ),
-                (),
-            );
-
-            split
+        if !is_merchant_registered_internal(&env, merchant.clone()) {
+            panic_with_error!(&env, SettlementError::MerchantMissing);
+        }
+        merchant.require_auth();
+        if reference == BytesN::from_array(&env, &[0; 32]) {
+            panic_with_error!(&env, SettlementError::InvalidPaymentReference);
+        }
+        if amount < MIN_PAYMENT_AMOUNT {
+            panic_with_error!(&env, SettlementError::AmountTooSmall);
         }
 
-        /// Calculate the fee split for a given merchant and amount without storing a payment reference.
-        ///
-        /// # Panics
-        ///
-        /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-        /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
-        /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
-        /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
-        pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
-            if !is_merchant_registered_internal(&env, merchant.clone()) {
-                panic_with_error!(&env, SettlementError::MerchantMissing);
-            }
-            if amount == 0 {
-                panic_with_error!(&env, SettlementError::AmountZero);
-            }
-            if amount < 0 {
-                panic_with_error!(&env, SettlementError::AmountNegative);
-            }
-            let rule = read_rule_or_default(&env, merchant);
-            calculate_split(&env, amount, &rule)
+        let payment_key = DataKey::Payment(reference.clone());
+        if env.storage().persistent().has(&payment_key) {
+            panic_with_error!(&env, SettlementError::DuplicatePaymentReference);
         }
 
-        /// Retrieve a payment record by its reference, extending the storage TTL if found.
-        pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
-            let key = DataKey::Payment(reference);
-            let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
-            if record.is_some() {
-                // `extend_ttl` only writes when the current TTL is below
-                // `threshold`, so this has the same externally observable
-                // behavior as a manual get_ttl-then-extend check, without
-                // depending on `get_ttl`, which is test-only in production code.
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
-            }
-            record
+        let rule = read_rule_or_default(&env, merchant.clone());
+        let split = calculate_split(&env, amount, &rule);
+        let record = PaymentRecord {
+            amount,
+            platform_fee_amount: split.platform_fee_amount,
+            network_fee_amount: split.network_fee_amount,
+            merchant_amount: split.merchant_amount,
+            platform_fee_bps: rule.platform_fee_bps,
+            network_fee_bps: rule.network_fee_bps,
+            ledger: env.ledger().sequence(),
+            settlement_delay_ledger: rule.settlement_delay_ledger,
+            auto_settle: rule.auto_settle,
+        };
+
+        env.storage().persistent().set(&payment_key, &record);
+        env.storage().persistent().extend_ttl(
+            &payment_key,
+            PAYMENT_TTL_THRESHOLD,
+            PAYMENT_TTL_BUMP,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "payment_stored"),
+                merchant.clone(),
+                reference.clone(),
+            ),
+            (),
+        );
+
+        split
+    }
+
+    /// Calculate the fee split for a given merchant and amount without storing a payment reference.
+    ///
+    /// # Panics
+    ///
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
+    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
+    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
+    /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
+    pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
+        if !is_merchant_registered_internal(&env, merchant.clone()) {
+            panic_with_error!(&env, SettlementError::MerchantMissing);
+        }
+        if amount == 0 {
+            panic_with_error!(&env, SettlementError::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, SettlementError::AmountNegative);
+        }
+        let rule = read_rule_or_default(&env, merchant);
+        calculate_split(&env, amount, &rule)
+    }
+
+    /// Retrieve a payment record by its reference, extending the storage TTL if found.
+    pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
+        let key = DataKey::Payment(reference);
+        let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
+            // `extend_ttl` only writes when the current TTL is below
+            // `threshold`, so this has the same externally observable
+            // behavior as a manual get_ttl-then-extend check, without
+            // depending on `get_ttl`, which is test-only in production code.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PAYMENT_TTL_THRESHOLD, PAYMENT_TTL_BUMP);
+        }
+        record
+    }
+
+    /// Retrieve multiple payment records by a vector of references.
+    ///
+    /// The returned vector preserves the input order. Each entry is `Some(payment)`
+    /// when a record exists for the corresponding reference and `None` otherwise.
+    pub fn get_payments(env: Env, references: Vec<BytesN<32>>) -> Vec<Option<PaymentRecord>> {
+        // `references.len()` is known upfront, so pre-allocating would avoid repeated
+        // reallocation as this vector grows. soroban-sdk 21.7.7's Vec<T> has no
+        // `with_capacity` constructor (only `new`, `from_array`, `from_slice`), so
+        // this is left as a potential optimization for a future SDK version.
+        let mut payments = Vec::new(&env);
+
+        for reference in references.iter() {
+            let payment = Self::get_payment_reference(env.clone(), reference.clone());
+            payments.push_back(payment);
         }
 
-        /// Retrieve multiple payment records by a vector of references.
-        ///
-        /// The returned vector preserves the input order. Each entry is `Some(payment)`
-        /// when a record exists for the corresponding reference and `None` otherwise.
-        pub fn get_payments(env: Env, references: Vec<BytesN<32>>) -> Vec<Option<PaymentRecord>> {
-            // `references.len()` is known upfront, so pre-allocating would avoid repeated
-            // reallocation as this vector grows. soroban-sdk 21.7.7's Vec<T> has no
-            // `with_capacity` constructor (only `new`, `from_array`, `from_slice`), so
-            // this is left as a potential optimization for a future SDK version.
-            let mut payments = Vec::new(&env);
-
-            for reference in references.iter() {
-                let payment = Self::get_payment_reference(env.clone(), reference.clone());
-                payments.push_back(payment);
-            }
-
-            payments
-        }
-
+        payments
+    }
 }

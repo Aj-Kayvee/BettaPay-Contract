@@ -418,4 +418,3 @@ fn bps_newtype_conversions_and_arithmetic_helpers_work() {
     let to_u32: u32 = from_u32.into();
     assert_eq!(to_u32, 100);
 }
-

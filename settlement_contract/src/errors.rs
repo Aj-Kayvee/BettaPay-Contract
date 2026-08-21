@@ -87,9 +87,7 @@ const _: () = {
     assert!(SettlementError::RecoveryNotPending as u32 == error_codes::RECOVERY_NOT_PENDING);
     assert!(SettlementError::RecoveryDelayActive as u32 == error_codes::RECOVERY_DELAY_ACTIVE);
     assert!(SettlementError::ExecutionNotReady as u32 == error_codes::EXECUTION_NOT_READY);
-    assert!(
-        SettlementError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED
-    );
+    assert!(SettlementError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED);
     assert!(
         SettlementError::OperationAlreadyScheduled as u32
             == error_codes::OPERATION_ALREADY_SCHEDULED
@@ -104,18 +102,13 @@ const _: () = {
     assert!(SettlementError::MerchantRuleNotSet as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(SettlementError::EmptyAddress as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(SettlementError::ZeroAddress as u32 >= error_codes::SETTLEMENT_RANGE_START);
-    assert!(
-        SettlementError::InvalidPaymentReference as u32 >= error_codes::SETTLEMENT_RANGE_START
-    );
-    assert!(
-        SettlementError::InvalidSettlementDelay as u32 >= error_codes::SETTLEMENT_RANGE_START
-    );
+    assert!(SettlementError::InvalidPaymentReference as u32 >= error_codes::SETTLEMENT_RANGE_START);
+    assert!(SettlementError::InvalidSettlementDelay as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(SettlementError::InvalidGovernance as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(SettlementError::AmountOverflow as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(SettlementError::GovernanceCallFailed as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(
-        SettlementError::FeeExceedsGovernanceConfig as u32
-            >= error_codes::SETTLEMENT_RANGE_START
+        SettlementError::FeeExceedsGovernanceConfig as u32 >= error_codes::SETTLEMENT_RANGE_START
     );
     assert!(SettlementError::AmountTooSmall as u32 >= error_codes::SETTLEMENT_RANGE_START);
     assert!(SettlementError::AmountZero as u32 >= error_codes::SETTLEMENT_RANGE_START);

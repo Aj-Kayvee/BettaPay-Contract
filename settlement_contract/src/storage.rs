@@ -1,4 +1,4 @@
-use soroban_sdk::{panic_with_error, Address, Env, Symbol, TryFromVal, TryIntoVal, Val, Vec};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol, Val, Vec};
 
 use bettapay_common::{
     events::PendingRecovery,
@@ -230,36 +230,23 @@ pub(crate) fn assert_not_paused(env: &Env) {
 /// has explicitly configured.
 pub(crate) fn validate_fee_against_governance(env: &Env, rule: &SettlementRule) {
     let governance: Address = read_governance(env);
-    let fee_config: Val = env.invoke_contract(
+    let fee_config: Option<FeeConfig> = env.invoke_contract(
         &governance,
         &Symbol::new(env, "get_fee_config"),
         Vec::new(env),
     );
 
     // If governance returned a valid config, check fee ceilings.
-    // If it returned `()` (no config set), there is no ceiling to enforce.
-    if fee_config.is_void() {
-        return;
+    // If it returned `None` (no config set), there is no ceiling to enforce.
+    let fee_config = match fee_config {
+        Some(cfg) => cfg,
+        None => return,
+    };
+
+    if rule.platform_fee_bps > fee_config.platform_fee_bps {
+        panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
     }
-
-    let governance_fee: Vec<Val> = fee_config
-        .try_into_val(env)
-        .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
-
-    // Governance FeeConfig tuple is (platform_fee_bps: u32, network_fee_bps: u32)
-    if let Some(gov_platform_val) = governance_fee.get(0) {
-        let gov_platform_bps: u32 = u32::try_from_val(env, &gov_platform_val)
-            .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
-        if rule.platform_fee_bps > gov_platform_bps {
-            panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
-        }
-    }
-
-    if let Some(gov_network_val) = governance_fee.get(1) {
-        let gov_network_bps: u32 = u32::try_from_val(env, &gov_network_val)
-            .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
-        if rule.network_fee_bps > gov_network_bps {
-            panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
-        }
+    if rule.network_fee_bps > fee_config.network_fee_bps {
+        panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
     }
 }
