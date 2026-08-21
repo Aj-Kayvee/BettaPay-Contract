@@ -925,6 +925,47 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_fee_config_blocked_when_paused() {
+        let (_env, client, admins, _recovery) = setup();
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+
+        client.pause(&admins);
+        client.set_fee_config(&admins, &cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_fee_config_checks_paused_before_auth_and_validation() {
+        let (env, client, admins, _recovery) = setup();
+        let non_admin = Address::generate(&env);
+        let non_admin_signer = vec![&env, non_admin];
+        let invalid_cfg = FeeConfig {
+            platform_fee_bps: 5_001,
+            network_fee_bps: 4,
+        };
+
+        client.pause(&admins);
+        client.set_fee_config(&non_admin_signer, &invalid_cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn set_fee_config_rejects_signatures_below_threshold_when_not_paused() {
+        let (env, client, admins, _recovery) = setup();
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+        let single_signer = vec![&env, admins.get(0).unwrap()];
+
+        client.set_fee_config(&single_signer, &cfg);
+    }
+
+    #[test]
     fn fee_config_event_emitted_with_correct_fields() {
         let (env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
@@ -994,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn rejects_fee_bps_above_max() {
         let (_env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
@@ -1005,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn rejects_fee_bps_below_min() {
         let (_env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
