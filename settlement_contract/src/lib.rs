@@ -38,18 +38,26 @@
 //! the same conventions:
 //!
 //! - `topic[0]` is always the event name as a [`Symbol`], constructed via
-//!   [`Symbol::new`] (or [`symbol_short!`] when the name fits in nine bytes).
-//!   Indexers filter on this single topic to dispatch by event type.
+//!   [`Symbol::new`]. Indexers filter on this single topic to dispatch by
+//!   event type.
 //! - `topic[1..n]` carry the entity identifiers that scope the event —
 //!   typically an [`Address`] (merchant, asset, admin), but for some events
 //!   also a [`BytesN<32>`] (new Wasm hash on `contract_upgraded`, payment
 //!   reference on `payment_stored`). The exact shape of `topic[1..n]` is
 //!   fixed per event.
 //! - The **data payload** carries the values describing the state change.
-//!   Its shape is event-specific: a single value (`true` for `pause`,
-//!   `admin` for `merchant_registered`), a tuple (e.g.
-//!   `(admin, prev, rule)` for `settlement_rule_updated`), a typed struct
-//!   such as the `SettlementRule` emitted on `bootstrap_fallback`, or `()`.
+//!   Its shape is event-specific: a single value (`admin` for
+//!   `merchant_registered`), a tuple (e.g. `(admin, prev, rule)` for
+//!   `settlement_rule_updated`, or `(admin, true)` for `paused`), a typed
+//!   struct such as the `SettlementRule` emitted on `bootstrap_fallback` or
+//!   the shared [`bettapay_common::events::AdminTransferred`] payload on
+//!   `admin_transferred` / `recovery_executed`, or `()`.
+//!
+//! Events shared with the governance contract (`admin_transferred`, `paused`,
+//! `unpaused`, `recovery_initiated`, `recovery_cancelled`, `recovery_executed`,
+//! `threshold_changed`, `contract_upgraded`) use the canonical topic names and
+//! payload shapes defined in [`bettapay_common::events`] so an indexer can
+//! decode them identically no matter which contract published them.
 //! - Each entry point emits exactly the events tied to the state change it
 //!   performs; no two events emitted by the same call describe the same
 //!   logical change.
@@ -157,8 +165,24 @@ mod tests;
 use soroban_sdk::contract;
 
 pub use errors::SettlementError;
-pub use types::{FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
+pub use types::{Bps, FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
 
+/// Minimum gross payment amount, in the asset's smallest unit.
+///
+/// Derived as `BPS_DENOMINATOR / 100`. Each fee leg rounds up
+/// ([`Bps::calculate_fee_ceil`]) and so over-collects by strictly less than one
+/// unit; at 100 units that unit is 1 % of the gross, capping the inflation of a
+/// leg's effective rate below 100 bps over its configured bps. Below the floor the
+/// distortion is unbounded — 1 unit charged the minimum legal fee (`MIN_FEE_BPS`,
+/// 0.05 %) still rounds up to 1 unit, a 100 % effective fee. 100 is also the
+/// smallest amount at which [`BOOTSTRAP_DEFAULT_RULE`]'s 100 bps platform fee is
+/// exact. Nothing but dust is excluded: on a 7-decimal Soroban asset, 100 base
+/// units is 10^-5 of one token.
+///
+/// Enforced by [`SettlementContract::store_payment_reference`], which panics with
+/// [`AmountTooSmall`](SettlementError::AmountTooSmall). It does **not** guarantee a
+/// non-negative merchant payout — extreme fee rules can still make the two
+/// rounded-up legs exceed the gross; see `calculate_split` for that edge case.
 pub(crate) const MIN_PAYMENT_AMOUNT: i128 = 100;
 pub(crate) const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
 /// Approximate ledgers per day on Stellar (~5s per ledger).

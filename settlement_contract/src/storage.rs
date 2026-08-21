@@ -23,7 +23,7 @@ pub(crate) fn read_admins(env: &Env) -> Vec<Address> {
 }
 
 pub(crate) fn read_admin(env: &Env) -> Address {
-    read_admins(env).get(0).unwrap()
+    storage::primary_admin(&read_admins(env)).unwrap()
 }
 
 pub(crate) fn read_threshold(env: &Env) -> u32 {

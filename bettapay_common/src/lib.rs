@@ -14,6 +14,11 @@
 //!   shared by every contract's instance storage.
 //! - [`events`] — shared event shapes (such as [`events::AdminTransferred`] and
 //!   [`events::PendingRecovery`]) and the canonical event-name strings.
+//! - [`error_codes`] — the canonical numeric error-code registry. Every
+//!   contract's `#[contracterror]` enum must use these constants as
+//!   discriminants for shared error concepts, and stay within its reserved
+//!   range for contract-specific ones, so that a raw error code means the
+//!   same thing regardless of which contract raised it. See issue #517.
 //!
 //! ## Why this crate exists
 //!
@@ -27,5 +32,6 @@
 #![no_std]
 
 pub mod constants;
+pub mod error_codes;
 pub mod events;
 pub mod storage;

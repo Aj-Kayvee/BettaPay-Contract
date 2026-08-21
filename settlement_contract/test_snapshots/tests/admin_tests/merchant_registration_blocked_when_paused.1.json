@@ -264,7 +264,7 @@
             },
             "ext": "v0"
           },
-          100000
+          518400
         ]
       ],
       [
@@ -285,7 +285,7 @@
             },
             "ext": "v0"
           },
-          100000
+          518400
         ]
       ]
     ]
@@ -439,7 +439,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "pause"
+                "symbol": "paused"
               }
             ],
             "data": {
@@ -575,7 +575,7 @@
               },
               {
                 "error": {
-                  "contract": 9
+                  "contract": 5
                 }
               }
             ],
@@ -585,7 +585,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 9
+                  "u32": 5
                 }
               ]
             }
@@ -607,7 +607,7 @@
               },
               {
                 "error": {
-                  "contract": 9
+                  "contract": 5
                 }
               }
             ],
@@ -632,7 +632,7 @@
               },
               {
                 "error": {
-                  "contract": 9
+                  "contract": 5
                 }
               }
             ],
@@ -657,7 +657,7 @@
               },
               {
                 "error": {
-                  "contract": 9
+                  "contract": 5
                 }
               }
             ],
@@ -703,7 +703,7 @@
               },
               {
                 "error": {
-                  "contract": 9
+                  "contract": 5
                 }
               }
             ],
