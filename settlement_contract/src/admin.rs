@@ -1,7 +1,5 @@
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{
-    contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec,
-};
+use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
 
 use bettapay_common::{
     constants::{BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
@@ -327,24 +325,6 @@ impl SettlementContract {
 
     // --- Internal Admin Functions ---
 
-        pub fn pause(env: Env, signers: Vec<Address>) {
-            verify_admin_auth(&env, &signers, read_threshold(&env));
-            let admin = signers.get(0).unwrap();
-            env.storage().instance().set(&DataKey::Paused, &true);
-            env.events().publish(
-                (Symbol::new(&env, events::PAUSED_EVENT),),
-                (admin, true),
-            );
-        }
-
-        pub fn unpause(env: Env, signers: Vec<Address>) {
-            verify_admin_auth(&env, &signers, read_threshold(&env));
-            let admin = signers.get(0).unwrap();
-            env.storage().instance().set(&DataKey::Paused, &false);
-            env.events().publish(
-                (Symbol::new(&env, events::UNPAUSED_EVENT),),
-                (admin, false),
-            );
     fn _update_governance(env: &Env, new_governance: Address) {
         assert_not_paused(env);
         validate_governance(env, &new_governance);
