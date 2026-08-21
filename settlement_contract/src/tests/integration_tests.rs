@@ -12,7 +12,7 @@ use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal, Vec};
 
-use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
+use bettapay_common::constants::{BPS_DENOMINATOR, RECOVERY_DELAY_SECONDS};
 use bettapay_common::events::AdminTransferred;
 
 use governance_contract::{FeeConfig as GovFeeConfig, GovernanceContract, GovernanceContractClient};
@@ -154,9 +154,7 @@ fn governance_fee_config_acts_as_ceiling_for_merchant_rules() {
         settlement_delay_ledger: 0,
         auto_settle: false,
     };
-    let result = std::panic::catch_unwind(|| {
-        settle_client.set_settlement_rule(&settle_admins, &merchant, &bad_rule);
-    });
+    let result = settle_client.try_set_settlement_rule(&settle_admins, &merchant, &bad_rule);
     assert!(result.is_err(), "rule exceeding governance ceiling must panic");
 
     let _ = env;
@@ -188,9 +186,7 @@ fn global_default_rule_respects_governance_fee_ceiling() {
         settlement_delay_ledger: 5,
         auto_settle: true,
     };
-    let result = std::panic::catch_unwind(|| {
-        settle_client.set_default_rule(&settle_admins, &bad_default);
-    });
+    let result = settle_client.try_set_default_rule(&settle_admins, &bad_default);
     assert!(result.is_err(), "default exceeding governance ceiling must panic");
 
     let _ = env;
@@ -390,7 +386,7 @@ fn recovery_events_follow_shared_convention_on_both_contracts() {
     let mut found_settle = false;
     for i in 0..events.len() {
         let (_contract, topics, data) = events.get(i).unwrap();
-        if topics.len() < 1 {
+        if topics.is_empty() {
             continue;
         }
         let sym = Symbol::from_val(&env, &topics.get(0).unwrap());
@@ -507,14 +503,10 @@ fn multisig_threshold_works_independently_on_both_contracts() {
     let one_signer = soroban_sdk::vec![&env, a1.clone()];
     let three_signers = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
 
-    let result_gov = std::panic::catch_unwind(|| {
-        gov_client.update_system_param(&one_signer, &Symbol::new(&env, "k"), &1);
-    });
+    let result_gov = gov_client.try_update_system_param(&one_signer, &Symbol::new(&env, "k"), &1);
     assert!(result_gov.is_err(), "governance rejects sub-threshold signers");
 
-    let result_settle = std::panic::catch_unwind(|| {
-        settle_client.pause(&one_signer);
-    });
+    let result_settle = settle_client.try_pause(&one_signer);
     assert!(result_settle.is_err(), "settlement rejects sub-threshold signers");
 
     // change_threshold requires threshold + 1 = 3 signers.
@@ -630,4 +622,48 @@ fn full_lifecycle_configure_governance_then_process_payments() {
             amounts[i as usize]
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `MIN_PAYMENT_AMOUNT` floor — see the constant's doc comment for the rationale.
+// ---------------------------------------------------------------------------
+
+/// Locks the derivation `MIN_PAYMENT_AMOUNT == BPS_DENOMINATOR / 100`, so that
+/// changing either value without revisiting the ceil-rounding argument breaks
+/// the build rather than silently widening the fee distortion.
+#[test]
+fn min_payment_amount_is_derived_from_bps_denominator() {
+    assert_eq!(MIN_PAYMENT_AMOUNT, 100);
+    assert_eq!(MIN_PAYMENT_AMOUNT, (BPS_DENOMINATOR / 100) as i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn store_payment_reference_rejects_amount_below_min() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[9u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &(MIN_PAYMENT_AMOUNT - 1));
+}
+
+#[test]
+fn store_payment_reference_accepts_amount_at_min() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[10u8; 32]);
+    let split = settle_client.store_payment_reference(&merchant, &reference, &MIN_PAYMENT_AMOUNT);
+
+    assert_eq!(split.gross_amount, MIN_PAYMENT_AMOUNT);
+    assert_eq!(
+        split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+        split.gross_amount,
+        "fee legs plus merchant amount must reconstruct the gross amount"
+    );
+    // Bootstrap default rule applies (100 bps platform, 0 network): at the floor
+    // the platform fee is exactly 1 unit, with no ceil-rounding overshoot.
+    assert_eq!(split.platform_fee_amount, 1);
+    assert_eq!(split.network_fee_amount, 0);
+    assert_eq!(split.merchant_amount, 99);
 }
