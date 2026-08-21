@@ -297,9 +297,7 @@ const _: () = {
     assert!(GovernanceError::RecoveryNotPending as u32 == error_codes::RECOVERY_NOT_PENDING);
     assert!(GovernanceError::RecoveryDelayActive as u32 == error_codes::RECOVERY_DELAY_ACTIVE);
     assert!(GovernanceError::ExecutionNotReady as u32 == error_codes::EXECUTION_NOT_READY);
-    assert!(
-        GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED
-    );
+    assert!(GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED);
     assert!(
         GovernanceError::OperationAlreadyScheduled as u32
             == error_codes::OPERATION_ALREADY_SCHEDULED

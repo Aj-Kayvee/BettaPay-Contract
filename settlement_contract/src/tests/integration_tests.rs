@@ -15,7 +15,9 @@ use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal, Vec};
 use bettapay_common::constants::{BPS_DENOMINATOR, RECOVERY_DELAY_SECONDS};
 use bettapay_common::events::AdminTransferred;
 
-use governance_contract::{FeeConfig as GovFeeConfig, GovernanceContract, GovernanceContractClient};
+use governance_contract::{
+    FeeConfig as GovFeeConfig, GovernanceContract, GovernanceContractClient,
+};
 
 /// Deploys a *real* `GovernanceContract` and initializes it with the supplied
 /// admin set. Returns the test environment plus the governance client and the
@@ -69,7 +71,14 @@ pub fn setup_both() -> (
     let settle_client = SettlementContractClient::new(&env, &settle_id);
     settle_client.init(&settle_admins, &1, &gov_id, &settle_recovery);
 
-    (env, gov_client, gov_admins, settle_client, settle_admins, merchant)
+    (
+        env,
+        gov_client,
+        gov_admins,
+        settle_client,
+        settle_admins,
+        merchant,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +164,10 @@ fn governance_fee_config_acts_as_ceiling_for_merchant_rules() {
         auto_settle: false,
     };
     let result = settle_client.try_set_settlement_rule(&settle_admins, &merchant, &bad_rule);
-    assert!(result.is_err(), "rule exceeding governance ceiling must panic");
+    assert!(
+        result.is_err(),
+        "rule exceeding governance ceiling must panic"
+    );
 
     let _ = env;
 }
@@ -187,7 +199,10 @@ fn global_default_rule_respects_governance_fee_ceiling() {
         auto_settle: true,
     };
     let result = settle_client.try_set_default_rule(&settle_admins, &bad_default);
-    assert!(result.is_err(), "default exceeding governance ceiling must panic");
+    assert!(
+        result.is_err(),
+        "default exceeding governance ceiling must panic"
+    );
 
     let _ = env;
 }
@@ -274,7 +289,10 @@ fn update_governance_switches_fee_source_to_new_instance() {
     settle_client.update_governance(&settle_admins, &new_gov_id);
 
     let after = settle_client.calculate_fee_split(&merchant, &10_000);
-    assert_eq!(after.platform_fee_amount, 500, "must use new governance BPS");
+    assert_eq!(
+        after.platform_fee_amount, 500,
+        "must use new governance BPS"
+    );
     assert_eq!(after.network_fee_amount, 50, "must use new governance BPS");
 }
 
@@ -402,8 +420,14 @@ fn recovery_events_follow_shared_convention_on_both_contracts() {
             }
         }
     }
-    assert!(found_gov, "governance recovery_executed matches shared event shape");
-    assert!(found_settle, "settlement recovery_executed matches shared event shape");
+    assert!(
+        found_gov,
+        "governance recovery_executed matches shared event shape"
+    );
+    assert!(
+        found_settle,
+        "settlement recovery_executed matches shared event shape"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -504,10 +528,16 @@ fn multisig_threshold_works_independently_on_both_contracts() {
     let three_signers = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
 
     let result_gov = gov_client.try_update_system_param(&one_signer, &Symbol::new(&env, "k"), &1);
-    assert!(result_gov.is_err(), "governance rejects sub-threshold signers");
+    assert!(
+        result_gov.is_err(),
+        "governance rejects sub-threshold signers"
+    );
 
     let result_settle = settle_client.try_pause(&one_signer);
-    assert!(result_settle.is_err(), "settlement rejects sub-threshold signers");
+    assert!(
+        result_settle.is_err(),
+        "settlement rejects sub-threshold signers"
+    );
 
     // change_threshold requires threshold + 1 = 3 signers.
     gov_client.change_threshold(&three_signers, &3);
@@ -593,10 +623,7 @@ fn full_lifecycle_configure_governance_then_process_payments() {
             rec.platform_fee_amount, platform,
             "payment {idx} platform fee"
         );
-        assert_eq!(
-            rec.network_fee_amount, network,
-            "payment {idx} network fee"
-        );
+        assert_eq!(rec.network_fee_amount, network, "payment {idx} network fee");
         assert_eq!(
             rec.merchant_amount, merchant_net,
             "payment {idx} merchant net"
@@ -617,10 +644,7 @@ fn full_lifecycle_configure_governance_then_process_payments() {
     let records = settle_client.get_payments(&refs);
     assert_eq!(records.len(), 4);
     for i in 0..4u32 {
-        assert_eq!(
-            records.get(i).unwrap().unwrap().amount,
-            amounts[i as usize]
-        );
+        assert_eq!(records.get(i).unwrap().unwrap().amount, amounts[i as usize]);
     }
 }
 
