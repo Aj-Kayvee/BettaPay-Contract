@@ -37,15 +37,15 @@ Rustup reads `rust-toolchain.toml` on first `cargo` invocation and installs the 
 
 ## Workspace Configuration
 
-This repository is a **Cargo workspace** containing two independently deployable Soroban contracts. Understanding the config files helps when adding dependencies, running targeted builds, or debugging CI failures.
+This repository is a **Cargo workspace** containing two independently deployable Soroban contracts and a shared library crate. Understanding the config files helps when adding dependencies, running targeted builds, or debugging CI failures.
 
 ### Root `Cargo.toml`
 
-The workspace root ties both contracts together:
+The workspace root ties the contracts and shared crate together:
 
 ```toml
 [workspace]
-members = ["settlement_contract", "governance_contract"]
+members = ["settlement_contract", "governance_contract", "bettapay_common"]
 resolver = "2"
 
 [workspace.package]
@@ -55,16 +55,17 @@ publish = false
 
 [workspace.dependencies]
 soroban-sdk = "21.7.7"
+bettapay_common = { path = "bettapay_common" }
 ```
 
 | Section | Purpose |
 |---------|---------|
-| `members` | Lists each contract crate in the workspace |
+| `members` | Lists each crate in the workspace |
 | `resolver = "2"` | Uses Cargo's dependency resolver v2 (required for edition 2021) |
 | `[workspace.package]` | Shared metadata inherited by member crates |
 | `[workspace.dependencies]` | Single source of truth for shared dependency versions |
 
-Both contracts reference the SDK with `soroban-sdk = { workspace = true }`, so version bumps happen in one place.
+Both contracts reference the SDK with `soroban-sdk = { workspace = true }`, and the shared `bettapay_common` crate with `bettapay_common = { workspace = true }`, so version bumps happen in one place.
 
 ### `rust-toolchain.toml`
 
@@ -112,6 +113,9 @@ BettaPay-Contract/
 │   ├── Cargo.toml
 │   ├── src/lib.rs
 │   └── test_snapshots/
+├── bettapay_common/             # Shared types, events, storage helpers, error codes
+│   ├── Cargo.toml
+│   └── src/lib.rs
 └── scripts/
     ├── deploy_testnet.sh       # Build + deploy both contracts to testnet
     └── simulate.sh             # Local deploy + init for simulation
