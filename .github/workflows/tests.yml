@@ -38,6 +38,6 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: Run unit and integration tests
-        run: cargo test --workspace --test-threads=1
+        run: cargo test --workspace -- --test-threads=1
         env:
           RUST_BACKTRACE: short

@@ -498,7 +498,24 @@
               }
             ],
             "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+              "map": [
+                {
+                  "key": {
+                    "symbol": "new_admin"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "old_admin"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                  }
+                }
+              ]
             }
           }
         }
@@ -579,7 +596,7 @@
               },
               {
                 "error": {
-                  "contract": 26
+                  "contract": 14
                 }
               }
             ],
@@ -589,7 +606,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 26
+                  "u32": 14
                 }
               ]
             }
@@ -611,7 +628,7 @@
               },
               {
                 "error": {
-                  "contract": 26
+                  "contract": 14
                 }
               }
             ],
@@ -636,7 +653,7 @@
               },
               {
                 "error": {
-                  "contract": 26
+                  "contract": 14
                 }
               }
             ],
@@ -661,7 +678,7 @@
               },
               {
                 "error": {
-                  "contract": 26
+                  "contract": 14
                 }
               }
             ],
@@ -710,7 +727,7 @@
               },
               {
                 "error": {
-                  "contract": 26
+                  "contract": 14
                 }
               }
             ],

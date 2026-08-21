@@ -14,7 +14,10 @@ use governance_contract::GovernanceError;
 
 fn governance_codes() -> [(&'static str, u32); 19] {
     [
-        ("AlreadyInitialized", GovernanceError::AlreadyInitialized as u32),
+        (
+            "AlreadyInitialized",
+            GovernanceError::AlreadyInitialized as u32,
+        ),
         ("NotInitialized", GovernanceError::NotInitialized as u32),
         ("Unauthorized", GovernanceError::Unauthorized as u32),
         ("InvalidFeeBps", GovernanceError::InvalidFeeBps as u32),
@@ -120,7 +123,10 @@ fn settlement_codes() -> [(&'static str, u32); 24] {
             "InvalidSettlementDelay",
             SettlementError::InvalidSettlementDelay as u32,
         ),
-        ("InvalidGovernance", SettlementError::InvalidGovernance as u32),
+        (
+            "InvalidGovernance",
+            SettlementError::InvalidGovernance as u32,
+        ),
         ("AmountOverflow", SettlementError::AmountOverflow as u32),
     ]
 }
@@ -137,7 +143,10 @@ fn shared_registry_codes_are_identical_in_both_contracts() {
             .find(|&(n, _)| n == name)
             .unwrap_or_else(|| panic!("settlement_contract has no `{name}` variant"));
         assert_eq!(gov.1, code, "governance `{name}` drifted from the registry");
-        assert_eq!(settle.1, code, "settlement `{name}` drifted from the registry");
+        assert_eq!(
+            settle.1, code,
+            "settlement `{name}` drifted from the registry"
+        );
     }
 }
 

@@ -12,8 +12,8 @@
 //!    directly and when reached through `transfer_admin` from the recovered
 //!    admin.
 //!
-//! Error codes referenced here: `InvalidAdmin` = 14, `ZeroAddress` = 21,
-//! `InvalidThreshold` = 26.
+//! Error codes referenced here: `InvalidAdmin` = 6, `ZeroAddress` = 306,
+//! `InvalidThreshold` = 14.
 
 use crate::storage::validate_admins_and_threshold;
 use crate::*;
@@ -69,7 +69,7 @@ fn recover_to(env: &Env, client: &SettlementContractClient<'static>, new_admin: 
 // either 0 or greater than `admins.len() == 0`, so the guard rejects with
 // `InvalidThreshold` (#26) before the `is_empty` branch is ever reached.
 #[test]
-#[should_panic(expected = "Error(Contract, #26)")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn validate_rejects_empty_admin_set_with_threshold_one() {
     let (env, client, _admins, _merchant) = setup();
     let empty: Vec<Address> = Vec::new(&env);
@@ -79,7 +79,7 @@ fn validate_rejects_empty_admin_set_with_threshold_one() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #26)")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn validate_rejects_empty_admin_set_with_zero_threshold() {
     let (env, client, _admins, _merchant) = setup();
     let empty: Vec<Address> = Vec::new(&env);
@@ -92,7 +92,7 @@ fn validate_rejects_empty_admin_set_with_zero_threshold() {
 // even at threshold 1 it silently inflates the signer count. The guard must
 // reject it with `InvalidAdmin` (#14).
 #[test]
-#[should_panic(expected = "Error(Contract, #14)")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn validate_rejects_duplicate_admins() {
     let (env, client, _admins, _merchant) = setup();
     let admin = Address::generate(&env);
@@ -103,7 +103,7 @@ fn validate_rejects_duplicate_admins() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #14)")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn validate_rejects_duplicate_admins_at_threshold_one() {
     let (env, client, _admins, _merchant) = setup();
     let admin = Address::generate(&env);
@@ -115,7 +115,7 @@ fn validate_rejects_duplicate_admins_at_threshold_one() {
 
 // The duplicate need not be adjacent — the guard compares every pair.
 #[test]
-#[should_panic(expected = "Error(Contract, #14)")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn validate_rejects_non_adjacent_duplicate_admins() {
     let (env, client, _admins, _merchant) = setup();
     let first = Address::generate(&env);
@@ -127,7 +127,7 @@ fn validate_rejects_non_adjacent_duplicate_admins() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #21)")]
+#[should_panic(expected = "Error(Contract, #306)")]
 fn validate_rejects_zero_address_in_admin_set() {
     let (env, client, _admins, _merchant) = setup();
     let admins = soroban_sdk::vec![&env, Address::generate(&env), zero_address(&env)];
@@ -211,7 +211,7 @@ fn recovery_to_existing_admin_does_not_duplicate_admin_set() {
 // place, otherwise `execute_recovery` would install an admin set the guard
 // would have rejected.
 #[test]
-#[should_panic(expected = "Error(Contract, #14)")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn initiate_recovery_rejects_zero_address_target() {
     let (env, client, _admins, _merchant) = setup();
     client.initiate_recovery(&zero_address(&env));
@@ -224,7 +224,7 @@ fn initiate_recovery_rejects_zero_address_target() {
 // The recovered admin is a lone signer at threshold 1 — the state in which an
 // unguarded `transfer_admin` would be easiest to lock the contract with.
 #[test]
-#[should_panic(expected = "Error(Contract, #26)")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn recovered_admin_cannot_transfer_to_empty_admin_set() {
     let env = Env::default();
     env.mock_all_auths();
@@ -242,7 +242,7 @@ fn recovered_admin_cannot_transfer_to_empty_admin_set() {
 // must be rejected with `InvalidAdmin` (#14) rather than storing a set whose
 // length overstates how many distinct keys can actually sign.
 #[test]
-#[should_panic(expected = "Error(Contract, #14)")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn recovered_admin_cannot_transfer_to_duplicate_admin_set() {
     let env = Env::default();
     env.mock_all_auths();
