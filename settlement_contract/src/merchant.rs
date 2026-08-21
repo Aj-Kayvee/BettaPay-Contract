@@ -12,73 +12,72 @@ use crate::{
 
 #[contractimpl]
 impl SettlementContract {
-        pub fn register_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
-            assert_not_paused(&env);
+    pub fn register_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
+        assert_not_paused(&env);
 
-            validate_nonzero_address(
-                &env,
-                &merchant,
-                SettlementError::EmptyAddress,
-                SettlementError::ZeroAddress,
-            );
+        validate_nonzero_address(
+            &env,
+            &merchant,
+            SettlementError::EmptyAddress,
+            SettlementError::ZeroAddress,
+        );
 
-            verify_admin_auth(&env, &signers, read_threshold(&env));
-            let admin = signers.get(0).unwrap();
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
-            let key = DataKey::Merchant(merchant.clone());
-            if env.storage().persistent().has(&key) {
-                panic_with_error!(&env, SettlementError::MerchantExists);
-            }
-
-            env.storage().persistent().set(&key, &());
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
-            env.events()
-                .publish((Symbol::new(&env, "merchant_registered"), merchant), admin);
+        let key = DataKey::Merchant(merchant.clone());
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, SettlementError::MerchantExists);
         }
 
-        pub fn unregister_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
-            assert_not_paused(&env);
-            verify_admin_auth(&env, &signers, read_threshold(&env));
-            let admin = signers.get(0).unwrap();
+        env.storage().persistent().set(&key, &());
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
+        env.events()
+            .publish((Symbol::new(&env, "merchant_registered"), merchant), admin);
+    }
 
-            let key = DataKey::Merchant(merchant.clone());
-            if !env.storage().persistent().has(&key) {
-                panic_with_error!(&env, SettlementError::MerchantMissing);
-            }
+    pub fn unregister_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
+        assert_not_paused(&env);
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
 
-            env.storage().persistent().remove(&key);
+        let key = DataKey::Merchant(merchant.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, SettlementError::MerchantMissing);
+        }
 
-            let rule_key = DataKey::Rule(merchant.clone());
-            let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
-            if let Some(old_rule) = old_rule {
-                env.storage().persistent().remove(&rule_key);
-                env.events().publish(
-                    (
-                        Symbol::new(&env, "settlement_rule_cleared"),
-                        merchant.clone(),
-                    ),
-                    (admin.clone(), old_rule),
-                );
-            }
+        env.storage().persistent().remove(&key);
 
+        let rule_key = DataKey::Rule(merchant.clone());
+        let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
+        if let Some(old_rule) = old_rule {
+            env.storage().persistent().remove(&rule_key);
             env.events().publish(
-                (Symbol::new(&env, "merchant_unregistered"), merchant),
-                admin,
+                (
+                    Symbol::new(&env, "settlement_rule_cleared"),
+                    merchant.clone(),
+                ),
+                (admin.clone(), old_rule),
             );
         }
 
-        /// Returns `true` if the given address is a registered merchant, `false` otherwise.
-        ///
-        /// # Panics
-        ///
-        /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
-        pub fn is_merchant_registered(env: Env, merchant: Address) -> bool {
-            if !env.storage().instance().has(&DataKey::Admin) {
-                panic_with_error!(&env, SettlementError::NotInitialized);
-            }
-            is_merchant_registered_internal(&env, merchant)
-        }
+        env.events().publish(
+            (Symbol::new(&env, "merchant_unregistered"), merchant),
+            admin,
+        );
+    }
 
+    /// Returns `true` if the given address is a registered merchant, `false` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// * [`NotInitialized`](SettlementError::NotInitialized) — if the contract has not been initialized yet.
+    pub fn is_merchant_registered(env: Env, merchant: Address) -> bool {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(&env, SettlementError::NotInitialized);
+        }
+        is_merchant_registered_internal(&env, merchant)
+    }
 }

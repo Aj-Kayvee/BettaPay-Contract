@@ -6,6 +6,8 @@
 
 pub mod admin_tests;
 pub mod conformity_tests;
+pub mod integration_tests;
+pub mod recovery_admin_set_tests;
 
 use crate::*;
 use soroban_sdk::testutils::Address as _;

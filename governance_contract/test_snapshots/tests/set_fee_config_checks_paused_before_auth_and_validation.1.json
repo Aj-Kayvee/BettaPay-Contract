@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 4,
+    "address": 5,
     "nonce": 0
   },
   "auth": [
@@ -560,10 +560,7 @@
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                     }
                   ]
                 },
@@ -574,7 +571,7 @@
                         "symbol": "network_fee_bps"
                       },
                       "val": {
-                        "u32": 35
+                        "u32": 4
                       }
                     },
                     {
@@ -582,7 +579,7 @@
                         "symbol": "platform_fee_bps"
                       },
                       "val": {
-                        "u32": 120
+                        "u32": 5001
                       }
                     }
                   ]
@@ -706,10 +703,7 @@
                     {
                       "vec": [
                         {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-                        },
-                        {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                         }
                       ]
                     },
@@ -720,7 +714,7 @@
                             "symbol": "network_fee_bps"
                           },
                           "val": {
-                            "u32": 35
+                            "u32": 4
                           }
                         },
                         {
@@ -728,7 +722,7 @@
                             "symbol": "platform_fee_bps"
                           },
                           "val": {
-                            "u32": 120
+                            "u32": 5001
                           }
                         }
                       ]

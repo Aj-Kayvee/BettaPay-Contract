@@ -297,9 +297,7 @@ const _: () = {
     assert!(GovernanceError::RecoveryNotPending as u32 == error_codes::RECOVERY_NOT_PENDING);
     assert!(GovernanceError::RecoveryDelayActive as u32 == error_codes::RECOVERY_DELAY_ACTIVE);
     assert!(GovernanceError::ExecutionNotReady as u32 == error_codes::EXECUTION_NOT_READY);
-    assert!(
-        GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED
-    );
+    assert!(GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED);
     assert!(
         GovernanceError::OperationAlreadyScheduled as u32
             == error_codes::OPERATION_ALREADY_SCHEDULED
@@ -450,7 +448,7 @@ impl GovernanceContract {
         }
 
         let old_admins = read_admins(&env);
-        let old_admin = old_admins.get(0).unwrap();
+        let old_admin = storage::primary_admin(&old_admins).unwrap();
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
         env.storage().instance().set(&DataKey::Admin, &new_admins);
         env.storage().instance().set(&DataKey::Threshold, &1u32);
@@ -492,10 +490,10 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &new_threshold);
-        events::emit_admin_transferred(
-            &env,
-            &AdminTransferred {
-                old_admin: old_admins.get(0).unwrap(),
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"),),
+            AdminTransferred {
+                old_admin: storage::primary_admin(&old_admins).unwrap(),
                 new_admin: new_admins.get(0).unwrap(),
             },
         );
@@ -525,7 +523,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::AlreadyPaused);
         }
         let admin = signers.get(0).unwrap();
-        env.storage().instance().set(&DataKey::Paused, &true);
+        storage::set_paused(&env, true);
         events::emit_paused(&env, &admin);
     }
 
@@ -535,7 +533,7 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::AlreadyUnpaused);
         }
         let admin = signers.get(0).unwrap();
-        env.storage().instance().set(&DataKey::Paused, &false);
+        storage::set_paused(&env, false);
         events::emit_unpaused(&env, &admin);
     }
 
@@ -670,9 +668,7 @@ impl GovernanceContract {
 }
 
 fn read_admins(env: &Env) -> Vec<Address> {
-    env.storage()
-        .instance()
-        .extend_ttl(TTL_THRESHOLD_LEDGERS, TTL_BUMP_LEDGERS);
+    storage::bump_instance_ttl(env);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -927,6 +923,47 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_fee_config_blocked_when_paused() {
+        let (_env, client, admins, _recovery) = setup();
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+
+        client.pause(&admins);
+        client.set_fee_config(&admins, &cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn set_fee_config_checks_paused_before_auth_and_validation() {
+        let (env, client, admins, _recovery) = setup();
+        let non_admin = Address::generate(&env);
+        let non_admin_signer = vec![&env, non_admin];
+        let invalid_cfg = FeeConfig {
+            platform_fee_bps: 5_001,
+            network_fee_bps: 4,
+        };
+
+        client.pause(&admins);
+        client.set_fee_config(&non_admin_signer, &invalid_cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn set_fee_config_rejects_signatures_below_threshold_when_not_paused() {
+        let (env, client, admins, _recovery) = setup();
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+        let single_signer = vec![&env, admins.get(0).unwrap()];
+
+        client.set_fee_config(&single_signer, &cfg);
+    }
+
+    #[test]
     fn fee_config_event_emitted_with_correct_fields() {
         let (env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
@@ -996,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn rejects_fee_bps_above_max() {
         let (_env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
@@ -1007,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn rejects_fee_bps_below_min() {
         let (_env, client, admins, _recovery) = setup();
         let cfg = FeeConfig {
@@ -1189,5 +1226,27 @@ mod tests {
         client.unpause(&admins);
         assert!(!client.is_paused());
         assert!(env.events().all().len() > before_unpause);
+    }
+
+    /// Pins `pause`/`unpause` to `bettapay_common::events`' canonical topic
+    /// constants rather than a locally inlined string, so this test fails if
+    /// either entry point stops routing through the shared emit helper.
+    #[test]
+    fn pause_and_unpause_emit_canonical_shared_topics() {
+        let (env, client, admins, _recovery) = setup();
+
+        client.pause(&admins);
+        let (_, pause_topics, _) = env.events().all().last().unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &pause_topics.get(0).unwrap()),
+            Symbol::new(&env, bettapay_common::events::PAUSED_EVENT)
+        );
+
+        client.unpause(&admins);
+        let (_, unpause_topics, _) = env.events().all().last().unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &unpause_topics.get(0).unwrap()),
+            Symbol::new(&env, bettapay_common::events::UNPAUSED_EVENT)
+        );
     }
 }
