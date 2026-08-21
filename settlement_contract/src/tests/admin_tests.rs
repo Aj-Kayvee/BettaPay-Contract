@@ -251,6 +251,72 @@ fn set_default_rule_rejected_when_paused() {
 }
 
 // ---------------------------------------------------------------------------
+// fee ceiling (issue #521)
+// ---------------------------------------------------------------------------
+
+// Both fees are independently capped at MAX_FEE_BPS (5000, i.e. 50%), even
+// before governance has configured a FeeConfig - settlement no longer relies
+// solely on `validate_fee_against_governance` (which is a no-op with no
+// governance config set) to keep per-fee values below 100%.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn set_settlement_rule_rejects_platform_fee_above_max_fee_bps() {
+    let (_env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
+
+    let rule = SettlementRule {
+        platform_fee_bps: bettapay_common::constants::MAX_FEE_BPS + 1,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 7,
+        auto_settle: true,
+    };
+    client.set_settlement_rule(&admins, &merchant, &rule);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn set_settlement_rule_rejects_network_fee_above_max_fee_bps() {
+    let (_env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 50,
+        network_fee_bps: bettapay_common::constants::MAX_FEE_BPS + 1,
+        settlement_delay_ledger: 7,
+        auto_settle: true,
+    };
+    client.set_settlement_rule(&admins, &merchant, &rule);
+}
+
+#[test]
+fn set_settlement_rule_accepts_fee_at_max_fee_bps_ceiling() {
+    let (_env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
+
+    let rule = SettlementRule {
+        platform_fee_bps: bettapay_common::constants::MAX_FEE_BPS,
+        network_fee_bps: bettapay_common::constants::MIN_FEE_BPS,
+        settlement_delay_ledger: 7,
+        auto_settle: true,
+    };
+    client.set_settlement_rule(&admins, &merchant, &rule);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn set_default_rule_rejects_fee_above_max_fee_bps() {
+    let (_env, client, admins, _merchant) = setup();
+
+    let rule = SettlementRule {
+        platform_fee_bps: bettapay_common::constants::MAX_FEE_BPS + 1,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 7,
+        auto_settle: true,
+    };
+    client.set_default_rule(&admins, &rule);
+}
+
+// ---------------------------------------------------------------------------
 // upgrade
 // ---------------------------------------------------------------------------
 
@@ -352,4 +418,3 @@ fn bps_newtype_conversions_and_arithmetic_helpers_work() {
     let to_u32: u32 = from_u32.into();
     assert_eq!(to_u32, 100);
 }
-

@@ -88,7 +88,6 @@ impl SettlementRule {
     }
 }
 
-
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeSplit {

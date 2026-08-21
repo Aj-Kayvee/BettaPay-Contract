@@ -1,4 +1,4 @@
-use soroban_sdk::{panic_with_error, Address, Env, Symbol, TryFromVal, TryIntoVal, Val, Vec};
+use soroban_sdk::{panic_with_error, Address, Env, Symbol, Val, Vec};
 
 use bettapay_common::{
     events::{self, PendingRecovery},
@@ -8,8 +8,8 @@ use bettapay_common::{
 use crate::errors::SettlementError;
 use crate::types::{DataKey, FeeConfig, SettlementRule};
 use crate::{
-    BOOTSTRAP_DEFAULT_RULE, MERCHANT_TTL_BUMP, MERCHANT_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP,
-    READ_INSTANCE_TTL_THRESHOLD, RULE_TTL_BUMP, RULE_TTL_THRESHOLD,
+    BOOTSTRAP_DEFAULT_RULE, MAX_SETTLEMENT_DELAY_LEDGER, MERCHANT_TTL_BUMP, MERCHANT_TTL_THRESHOLD,
+    READ_INSTANCE_TTL_BUMP, READ_INSTANCE_TTL_THRESHOLD, RULE_TTL_BUMP, RULE_TTL_THRESHOLD,
 };
 
 pub(crate) fn read_admins(env: &Env) -> Vec<Address> {
@@ -23,7 +23,7 @@ pub(crate) fn read_admins(env: &Env) -> Vec<Address> {
 }
 
 pub(crate) fn read_admin(env: &Env) -> Address {
-    read_admins(env).get(0).unwrap()
+    storage::primary_admin(&read_admins(env)).unwrap()
 }
 
 pub(crate) fn read_threshold(env: &Env) -> u32 {
@@ -199,12 +199,18 @@ pub(crate) fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
         &Symbol::new(env, "get_fee_config"),
         args,
     ) {
-        Ok(Ok(Some(config))) => Some(SettlementRule {
-            platform_fee_bps: config.platform_fee_bps,
-            network_fee_bps: config.network_fee_bps,
-            settlement_delay_ledger: 0,
-            auto_settle: false,
-        }),
+        Ok(Ok(Some(config))) => {
+            let rule = SettlementRule {
+                platform_fee_bps: config.platform_fee_bps,
+                network_fee_bps: config.network_fee_bps,
+                settlement_delay_ledger: 0,
+                auto_settle: false,
+            };
+            if rule.settlement_delay_ledger > MAX_SETTLEMENT_DELAY_LEDGER {
+                panic_with_error!(env, SettlementError::InvalidSettlementDelay);
+            }
+            Some(rule)
+        }
         _ => None,
     }
 }
@@ -224,36 +230,23 @@ pub(crate) fn assert_not_paused(env: &Env) {
 /// has explicitly configured.
 pub(crate) fn validate_fee_against_governance(env: &Env, rule: &SettlementRule) {
     let governance: Address = read_governance(env);
-    let fee_config: Val = env.invoke_contract(
+    let fee_config: Option<FeeConfig> = env.invoke_contract(
         &governance,
         &Symbol::new(env, "get_fee_config"),
         Vec::new(env),
     );
 
     // If governance returned a valid config, check fee ceilings.
-    // If it returned `()` (no config set), there is no ceiling to enforce.
-    if fee_config.is_void() {
-        return;
+    // If it returned `None` (no config set), there is no ceiling to enforce.
+    let fee_config = match fee_config {
+        Some(cfg) => cfg,
+        None => return,
+    };
+
+    if rule.platform_fee_bps > fee_config.platform_fee_bps {
+        panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
     }
-
-    let governance_fee: Vec<Val> = fee_config
-        .try_into_val(env)
-        .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
-
-    // Governance FeeConfig tuple is (platform_fee_bps: u32, network_fee_bps: u32)
-    if let Some(gov_platform_val) = governance_fee.get(0) {
-        let gov_platform_bps: u32 = u32::try_from_val(env, &gov_platform_val)
-            .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
-        if rule.platform_fee_bps > gov_platform_bps {
-            panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
-        }
-    }
-
-    if let Some(gov_network_val) = governance_fee.get(1) {
-        let gov_network_bps: u32 = u32::try_from_val(env, &gov_network_val)
-            .unwrap_or_else(|_| panic_with_error!(env, SettlementError::GovernanceCallFailed));
-        if rule.network_fee_bps > gov_network_bps {
-            panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
-        }
+    if rule.network_fee_bps > fee_config.network_fee_bps {
+        panic_with_error!(env, SettlementError::FeeExceedsGovernanceConfig);
     }
 }

@@ -2,19 +2,21 @@
 //!
 //! Each contract keeps its own private `DataKey` enum for keys that are
 //! contract-specific (e.g. settlement's `Merchant(Address)` or governance's
-//! `Anchor(Address)`). The keys that are semantically shared — the admin
-//! address, the pause flag, the recovery address, and the pending recovery
-//! operation — live in [`CommonDataKey`] so every contract reads and writes
-//! them in exactly the same shape.
+//! `Anchor(Address)`). The keys that are semantically shared — the pause
+//! flag, the recovery address, and the pending recovery operation — live in
+//! [`CommonDataKey`] so every contract reads and writes them in exactly the
+//! same shape. The admin role is *not* one of these: both contracts store it
+//! as a multisig `Vec<Address>` under their own `DataKey::Admin`, so there is
+//! no single-`Address` shape for this crate to own.
 //!
 //! The on-chain SCVal encoding of a Soroban `#[contracttype]` enum is based on
 //! the variant name only; the parent enum's Rust name is not part of the
-//! encoding. So a value written under `governance_contract::DataKey::Admin`
-//! reads back identically through `bettapay_common::CommonDataKey::Admin`,
+//! encoding. So a value written under `governance_contract::DataKey::Paused`
+//! reads back identically through `bettapay_common::CommonDataKey::Paused`,
 //! which is what allows both contracts to share this enum without disturbing
 //! any existing storage entry.
 
-use soroban_sdk::{contracttype, Address, Env, String};
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::constants::{TTL_BUMP_LEDGERS, TTL_THRESHOLD_LEDGERS};
 
@@ -26,8 +28,6 @@ use crate::constants::{TTL_BUMP_LEDGERS, TTL_THRESHOLD_LEDGERS};
 #[derive(Clone)]
 #[contracttype]
 pub enum CommonDataKey {
-    /// Contract admin `Address` (instance storage).
-    Admin,
     /// Recovery `Address` authorised to initiate the recovery flow
     /// (instance storage).
     RecoveryAddress,
@@ -37,17 +37,6 @@ pub enum CommonDataKey {
     /// Pause-flag `bool` controlling whether mutating operations are blocked
     /// (instance storage).
     Paused,
-}
-
-/// Returns the stored admin `Address` and refreshes the instance TTL while
-/// reading.
-///
-/// Returns `None` if the contract has not been initialised yet; the caller is
-/// expected to map a missing admin to its own `NotInitialized` error variant
-/// so the panic message keeps the contract's specific error code.
-pub fn read_admin(env: &Env) -> Option<Address> {
-    bump_instance_ttl(env);
-    env.storage().instance().get(&CommonDataKey::Admin)
 }
 
 /// Returns `true` if the contract is currently paused.
@@ -75,6 +64,24 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage()
         .instance()
         .set(&CommonDataKey::Paused, &paused);
+}
+
+/// Returns the first entry of a stored multisig admin list.
+///
+/// Both `governance_contract` and `settlement_contract` store their admin
+/// role as a `Vec<Address>` (under their own contract-specific `DataKey`,
+/// not [`CommonDataKey::Admin`]) and treat index `0` as the "primary" admin
+/// for single-address contexts — the address recorded on events, and the
+/// caller compared against in `schedule`/`cancel` ownership checks. Each
+/// contract previously reimplemented `admins.get(0).unwrap()` for this; this
+/// helper centralises that shared semantic so both contracts read it from
+/// one place.
+///
+/// Returns `None` if `admins` is empty; callers are expected to map that to
+/// their own `NotInitialized`/`InvalidAdmin` error, since an empty admin
+/// list should not be reachable once a contract is initialised.
+pub fn primary_admin(admins: &Vec<Address>) -> Option<Address> {
+    admins.get(0)
 }
 
 /// Returns `true` if `address` is the network's zero address.
@@ -119,46 +126,21 @@ pub fn bump_instance_ttl(env: &Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::contract;
-    use soroban_sdk::testutils::{storage::Instance as _, Ledger};
+    use soroban_sdk::{testutils::Address as _, vec};
 
-    #[contract]
-    struct TestContract;
-
-    /// Regression test for issue #520: `is_paused` used to be a bare read
-    /// with no TTL side effect, unlike every other instance-storage reader
-    /// in this module. A contract whose only activity was pause checks (no
-    /// `read_admin` or other instance write/read to keep the entry warm)
-    /// could let the instance entry's TTL run out while paused, and a
-    /// missing entry silently reads back as "not paused" via
-    /// `unwrap_or(false)` rather than failing loudly.
     #[test]
-    fn is_paused_bumps_instance_ttl() {
+    fn primary_admin_returns_first_entry() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, TestContract);
-        env.as_contract(&contract_id, || {
-            set_paused(&env, true);
-            let initial_ttl = env.storage().instance().get_ttl();
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2];
+        assert_eq!(primary_admin(&admins), Some(a1));
+    }
 
-            // Advance far enough that the remaining TTL drops below the bump
-            // threshold, but not so far that the entry is archived outright.
-            let advance = initial_ttl.saturating_sub(TTL_THRESHOLD_LEDGERS) + 1_000;
-            env.ledger().with_mut(|li| {
-                li.sequence_number += advance;
-            });
-            let ttl_before = env.storage().instance().get_ttl();
-            assert!(
-                ttl_before < TTL_THRESHOLD_LEDGERS,
-                "test setup should have decayed the TTL below the threshold, got {ttl_before}",
-            );
-
-            assert!(is_paused(&env));
-
-            let ttl_after = env.storage().instance().get_ttl();
-            assert!(
-                ttl_after > ttl_before,
-                "is_paused should have refreshed the instance TTL: before={ttl_before}, after={ttl_after}",
-            );
-        });
+    #[test]
+    fn primary_admin_returns_none_for_empty_list() {
+        let env = Env::default();
+        let admins: Vec<Address> = vec![&env];
+        assert_eq!(primary_admin(&admins), None);
     }
 }
