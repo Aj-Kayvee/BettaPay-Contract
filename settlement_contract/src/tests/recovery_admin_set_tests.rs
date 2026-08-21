@@ -67,7 +67,7 @@ fn recover_to(env: &Env, client: &SettlementContractClient<'static>, new_admin: 
 
 // An empty admin set can never satisfy the threshold check: any threshold is
 // either 0 or greater than `admins.len() == 0`, so the guard rejects with
-// `InvalidThreshold` (#26) before the `is_empty` branch is ever reached.
+// `InvalidThreshold` (#14) before the `is_empty` branch is ever reached.
 #[test]
 #[should_panic(expected = "Error(Contract, #14)")]
 fn validate_rejects_empty_admin_set_with_threshold_one() {
@@ -90,7 +90,7 @@ fn validate_rejects_empty_admin_set_with_zero_threshold() {
 
 // Two entries, one distinct admin: the set cannot honour a threshold of 2, and
 // even at threshold 1 it silently inflates the signer count. The guard must
-// reject it with `InvalidAdmin` (#14).
+// reject it with `InvalidAdmin` (#6).
 #[test]
 #[should_panic(expected = "Error(Contract, #6)")]
 fn validate_rejects_duplicate_admins() {
@@ -239,7 +239,7 @@ fn recovered_admin_cannot_transfer_to_empty_admin_set() {
 }
 
 // The duplicate-target case: handing `transfer_admin` the same address twice
-// must be rejected with `InvalidAdmin` (#14) rather than storing a set whose
+// must be rejected with `InvalidAdmin` (#6) rather than storing a set whose
 // length overstates how many distinct keys can actually sign.
 #[test]
 #[should_panic(expected = "Error(Contract, #6)")]
