@@ -804,6 +804,9 @@ mod anchor_event_tests;
 mod anchor_removal_tests;
 
 #[cfg(test)]
+mod anchor_no_event_error_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
