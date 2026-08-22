@@ -6,6 +6,7 @@
 
 pub mod admin_tests;
 pub mod conformity_tests;
+pub mod event_topic_conformity_tests;
 pub mod integration_tests;
 pub mod recovery_admin_set_tests;
 

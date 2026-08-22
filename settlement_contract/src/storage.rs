@@ -1,7 +1,7 @@
 use soroban_sdk::{panic_with_error, Address, Env, Symbol, Val, Vec};
 
 use bettapay_common::{
-    events::PendingRecovery,
+    events::{self, PendingRecovery},
     storage::{self, CommonDataKey},
 };
 
@@ -181,7 +181,7 @@ pub(crate) fn read_rule_or_default(env: &Env, merchant: Address) -> SettlementRu
     }
     // Final fallback keeps the contract usable before any config is stored.
     env.events().publish(
-        (Symbol::new(env, "bootstrap_fallback"),),
+        (Symbol::new(env, events::BOOTSTRAP_FALLBACK_EVENT),),
         BOOTSTRAP_DEFAULT_RULE,
     );
     BOOTSTRAP_DEFAULT_RULE

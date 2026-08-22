@@ -1,5 +1,7 @@
 use soroban_sdk::{contractimpl, panic_with_error, Address, Env, Symbol, Vec};
 
+use bettapay_common::events;
+
 use crate::errors::SettlementError;
 use crate::storage::{
     assert_not_paused, is_merchant_registered_internal, read_threshold, validate_nonzero_address,
@@ -34,8 +36,13 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
-        env.events()
-            .publish((Symbol::new(&env, "merchant_registered"), merchant), admin);
+        env.events().publish(
+            (
+                Symbol::new(&env, events::MERCHANT_REGISTERED_EVENT),
+                merchant,
+            ),
+            admin,
+        );
     }
 
     pub fn unregister_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
@@ -56,7 +63,7 @@ impl SettlementContract {
             env.storage().persistent().remove(&rule_key);
             env.events().publish(
                 (
-                    Symbol::new(&env, "settlement_rule_cleared"),
+                    Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT),
                     merchant.clone(),
                 ),
                 (admin.clone(), old_rule),
@@ -64,7 +71,10 @@ impl SettlementContract {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "merchant_unregistered"), merchant),
+            (
+                Symbol::new(&env, events::MERCHANT_UNREGISTERED_EVENT),
+                merchant,
+            ),
             admin,
         );
     }

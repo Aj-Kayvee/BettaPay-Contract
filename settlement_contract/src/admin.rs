@@ -94,7 +94,7 @@ impl SettlementContract {
             .instance()
             .set(&DataKey::Governance, &new_governance);
         env.events().publish(
-            (Symbol::new(&env, "governance_updated"),),
+            (Symbol::new(&env, events::GOVERNANCE_UPDATED_EVENT),),
             (admin, new_governance),
         );
     }
@@ -194,7 +194,7 @@ impl SettlementContract {
             .instance()
             .set(&DataKey::Threshold, &new_threshold);
         env.events().publish(
-            (Symbol::new(&env, "threshold_changed"),),
+            (Symbol::new(&env, events::THRESHOLD_CHANGED_EVENT),),
             (current_threshold, new_threshold),
         );
     }
@@ -205,7 +205,10 @@ impl SettlementContract {
 
         let event_wasm_hash = new_wasm_hash.clone();
         env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"), event_wasm_hash),
+            (
+                Symbol::new(&env, events::CONTRACT_UPGRADED_EVENT),
+                event_wasm_hash,
+            ),
             admin,
         );
 
@@ -256,7 +259,7 @@ impl SettlementContract {
             .extend_ttl(&key, 17280 * 14, 17280 * 30);
 
         env.events().publish(
-            (Symbol::new(&env, "op_scheduled"), op_hash),
+            (Symbol::new(&env, events::OP_SCHEDULED_EVENT), op_hash),
             (caller, execute_at),
         );
     }
@@ -299,7 +302,7 @@ impl SettlementContract {
         }
 
         env.events()
-            .publish((Symbol::new(&env, "op_executed"), op_hash), ());
+            .publish((Symbol::new(&env, events::OP_EXECUTED_EVENT), op_hash), ());
     }
 
     /// Cancels a scheduled administrative operation.
@@ -319,8 +322,10 @@ impl SettlementContract {
 
         env.storage().persistent().remove(&key);
 
-        env.events()
-            .publish((Symbol::new(&env, "op_cancelled"), op_hash), caller);
+        env.events().publish(
+            (Symbol::new(&env, events::OP_CANCELLED_EVENT), op_hash),
+            caller,
+        );
     }
 
     // --- Internal Admin Functions ---
@@ -333,7 +338,7 @@ impl SettlementContract {
             .instance()
             .set(&DataKey::Governance, &new_governance);
         env.events().publish(
-            (Symbol::new(env, "governance_updated"),),
+            (Symbol::new(env, events::GOVERNANCE_UPDATED_EVENT),),
             (admin, new_governance),
         );
     }
@@ -377,7 +382,10 @@ impl SettlementContract {
     fn _upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
         let admin = read_admin(env);
         env.events().publish(
-            (Symbol::new(env, "contract_upgraded"), new_wasm_hash.clone()),
+            (
+                Symbol::new(env, events::CONTRACT_UPGRADED_EVENT),
+                new_wasm_hash.clone(),
+            ),
             admin,
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -402,8 +410,13 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
-        env.events()
-            .publish((Symbol::new(env, "merchant_registered"), merchant), admin);
+        env.events().publish(
+            (
+                Symbol::new(env, events::MERCHANT_REGISTERED_EVENT),
+                merchant,
+            ),
+            admin,
+        );
     }
 
     fn _unregister_merchant(env: &Env, merchant: Address) {
@@ -423,15 +436,20 @@ impl SettlementContract {
             env.storage().persistent().remove(&rule_key);
             env.events().publish(
                 (
-                    Symbol::new(env, "settlement_rule_cleared"),
+                    Symbol::new(env, events::SETTLEMENT_RULE_CLEARED_EVENT),
                     merchant.clone(),
                 ),
                 (admin.clone(), old_rule),
             );
         }
 
-        env.events()
-            .publish((Symbol::new(env, "merchant_unregistered"), merchant), admin);
+        env.events().publish(
+            (
+                Symbol::new(env, events::MERCHANT_UNREGISTERED_EVENT),
+                merchant,
+            ),
+            admin,
+        );
     }
 
     fn _set_settlement_rule(env: &Env, merchant: Address, rule: SettlementRule) {
@@ -470,7 +488,10 @@ impl SettlementContract {
             .extend_ttl(&key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
 
         env.events().publish(
-            (Symbol::new(env, "settlement_rule_updated"), merchant),
+            (
+                Symbol::new(env, events::SETTLEMENT_RULE_UPDATED_EVENT),
+                merchant,
+            ),
             (admin, prev, rule),
         );
     }
@@ -491,7 +512,10 @@ impl SettlementContract {
         let fallback = read_rule_or_default(env, merchant.clone());
 
         env.events().publish(
-            (Symbol::new(env, "settlement_rule_cleared"), merchant),
+            (
+                Symbol::new(env, events::SETTLEMENT_RULE_CLEARED_EVENT),
+                merchant,
+            ),
             (admin, removed, fallback),
         );
     }
@@ -530,7 +554,7 @@ impl SettlementContract {
         );
 
         env.events().publish(
-            (Symbol::new(env, "default_rule_updated"),),
+            (Symbol::new(env, events::DEFAULT_RULE_UPDATED_EVENT),),
             (admin, prev, new_rule),
         );
     }
