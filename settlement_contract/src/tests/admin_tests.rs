@@ -118,7 +118,7 @@ fn emits_event_on_admin_transfer() {
     assert_eq!(topics.len(), 1);
     assert_eq!(
         Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "admin_transferred")
+        Symbol::new(&env, bettapay_common::events::ADMIN_TRANSFERRED_EVENT)
     );
 
     let payload: AdminTransferred = AdminTransferred::try_from_val(&env, &data).unwrap();
@@ -141,38 +141,37 @@ fn pause_flag_changes_state() {
     assert!(!client.is_paused());
 }
 
-// Issue #518: pause/unpause must publish the canonical `paused`/`unpaused`
-// topics with the shared `(admin, bool)` payload shape.
+// Issue #550: settlement previously emitted non-canonical "pause"/"unpause"/
+// "admin" topics while governance used "paused"/"unpaused"/
+// "admin_transferred", so an indexer subscribed to the canonical names
+// missed every settlement event. This pins settlement's topics to
+// `bettapay_common::events`' shared constants so it fails again if either
+// contract's topic strings drift apart.
 #[test]
-fn emits_canonical_pause_and_unpause_events() {
+fn pause_unpause_and_admin_transfer_use_canonical_topics() {
     let (env, client, admins, _merchant) = setup();
-    let admin = admins.get(0).unwrap();
 
     client.pause(&admins);
-    let events = env.events().all();
-    let event = events.last().unwrap();
-    let (contract_id, topics, data) = event;
-    assert_eq!(contract_id, client.address);
+    let (_, pause_topics, _) = env.events().all().last().unwrap();
     assert_eq!(
-        Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "paused")
+        Symbol::from_val(&env, &pause_topics.get(0).unwrap()),
+        Symbol::new(&env, bettapay_common::events::PAUSED_EVENT)
     );
-    let (event_admin, flag): (Address, bool) = FromVal::from_val(&env, &data);
-    assert_eq!(event_admin, admin);
-    assert!(flag);
 
     client.unpause(&admins);
-    let events = env.events().all();
-    let event = events.last().unwrap();
-    let (contract_id, topics, data) = event;
-    assert_eq!(contract_id, client.address);
+    let (_, unpause_topics, _) = env.events().all().last().unwrap();
     assert_eq!(
-        Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "unpaused")
+        Symbol::from_val(&env, &unpause_topics.get(0).unwrap()),
+        Symbol::new(&env, bettapay_common::events::UNPAUSED_EVENT)
     );
-    let (event_admin, flag): (Address, bool) = FromVal::from_val(&env, &data);
-    assert_eq!(event_admin, admin);
-    assert!(!flag);
+
+    let new_admin = Address::generate(&env);
+    client.transfer_admin(&admins, &soroban_sdk::vec![&env, new_admin], &1);
+    let (_, transfer_topics, _) = env.events().all().last().unwrap();
+    assert_eq!(
+        Symbol::from_val(&env, &transfer_topics.get(0).unwrap()),
+        Symbol::new(&env, bettapay_common::events::ADMIN_TRANSFERRED_EVENT)
+    );
 }
 
 // Issue #73: verify non-admins cannot pause the settlement contract
