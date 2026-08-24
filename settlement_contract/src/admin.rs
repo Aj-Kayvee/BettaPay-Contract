@@ -12,7 +12,7 @@ use crate::storage::{
     assert_not_paused, is_merchant_registered_internal, read_admin, read_admins, read_governance,
     read_pending_recovery, read_recovery_address, read_rule_or_default, read_threshold,
     validate_admins_and_threshold, validate_governance, validate_nonzero_address,
-    verify_admin_auth,
+    verify_admin_auth, write_admins,
 };
 use crate::types::{DataKey, Operation, SettlementRule};
 use crate::{
@@ -53,10 +53,7 @@ impl SettlementContract {
         for i in 0..threshold {
             admins.get(i).unwrap().require_auth();
         }
-        env.storage().instance().set(&DataKey::Admin, &admins);
-        env.storage()
-            .instance()
-            .set(&DataKey::Threshold, &threshold);
+        write_admins(&env, &admins, threshold);
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
@@ -143,8 +140,9 @@ impl SettlementContract {
 
         let old_admin = read_admin(&env);
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
-        env.storage().instance().set(&DataKey::Admin, &new_admins);
-        env.storage().instance().set(&DataKey::Threshold, &1u32);
+        // Finalize the new admin configuration before consuming the recovery.
+        // If validation or writing fails, the pending target remains available.
+        write_admins(&env, &new_admins, 1);
         env.storage()
             .instance()
             .remove(&CommonDataKey::PendingRecovery);
@@ -167,10 +165,7 @@ impl SettlementContract {
         validate_admins_and_threshold(&env, &new_admins, new_threshold);
 
         let old_admin = read_admin(&env);
-        env.storage().instance().set(&DataKey::Admin, &new_admins);
-        env.storage()
-            .instance()
-            .set(&DataKey::Threshold, &new_threshold);
+        write_admins(&env, &new_admins, new_threshold);
         let primary_new_admin = new_admins.get(0).unwrap();
         events::emit_admin_transferred(
             &env,
@@ -369,7 +364,7 @@ impl SettlementContract {
         if new_admin == admin {
             panic_with_error!(env, SettlementError::InvalidAdmin);
         }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        write_admins(env, &soroban_sdk::vec![env, new_admin.clone()], 1);
         events::emit_admin_transferred(
             env,
             &AdminTransferred {
