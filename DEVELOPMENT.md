@@ -21,8 +21,8 @@ the [README](README.md).
 
 Both contracts expose an admin-only `upgrade` entry point:
 
-- `SettlementContract::upgrade(env, new_wasm_hash)`
-- `GovernanceContract::upgrade(env, caller, new_wasm_hash)`
+- `SettlementContract::upgrade(env, signers, new_wasm_hash)`
+- `GovernanceContract::upgrade(env, signers, new_wasm_hash)`
 
 Each calls `env.deployer().update_current_contract_wasm(new_wasm_hash)`.
 
