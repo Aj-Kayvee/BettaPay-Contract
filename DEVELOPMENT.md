@@ -123,6 +123,8 @@ contract of its own.
 
 ## The Migration Pattern
 
+*Note: Neither `migrate` nor `SchemaVersion` is currently implemented in the contracts. This section serves as a theoretical template for contributors when the first breaking change arises.*
+
 Ordering is the point: the code that can read both formats has to be deployed
 before anything is rewritten.
 
@@ -131,7 +133,7 @@ before anything is rewritten.
 Before the first migration, add a version key so the contract can tell which
 format is on the ledger and refuse to run a migration twice.
 
-```rust
+```rust,ignore
 enum DataKey {
     // ...
     SchemaVersion,      // instance storage, u32
@@ -246,7 +248,7 @@ written before the field existed has no `settled` key, so deserialising it into
 the new struct **fails** — the read panics. Existing rows do not silently pick
 up a default. This is why the old type has to stay in the Wasm.
 
-```rust
+```rust,ignore
 /// Pre-v2 shape retained in Wasm so existing entries remain readable during lazy migration.
 #[contracttype]
 #[derive(Clone)]
@@ -300,7 +302,7 @@ impl PaymentRecordV1 {
 
 Updating the actual contract getter entry point [`get_payment_reference`](settlement_contract/src/payments.rs) to convert in place on read:
 
-```rust
+```rust,ignore
 pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
     let key = DataKey::Payment(reference);
 
@@ -326,7 +328,7 @@ pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentR
 
 The eager half, for fixed keys, gated by admin authentication and idempotent:
 
-```rust
+```rust,ignore
 /// Migrates singleton entries to schema version 2. Admin only.
 pub fn migrate(env: Env, signers: Vec<Address>) {
     assert_not_paused(&env);
@@ -354,7 +356,7 @@ A `#[contracttype]` enum encodes the **variant name** as part of the key. So:
 
 To change a key format, keep the old variant long enough to read through it:
 
-```rust
+```rust,ignore
 enum DataKey {
     // ...
     Payment(BytesN<32>),           // v1 key, retained for migration reads
