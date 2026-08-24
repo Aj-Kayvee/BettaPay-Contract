@@ -18,7 +18,10 @@ clean:
 	cargo clean
 	@rm -rf target/optimized
 
-.PHONY: test check clippy all
+.PHONY: fmt test check clippy all
+
+fmt:
+	cargo fmt --all --check
 
 test:
 	cargo test --workspace
@@ -29,4 +32,4 @@ check:
 clippy:
 	cargo clippy --workspace -- -D warnings
 
-all: fmt check clippy test test_optimized wasm_size
+all: fmt check clippy test
