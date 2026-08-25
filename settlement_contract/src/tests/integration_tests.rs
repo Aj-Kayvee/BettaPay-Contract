@@ -795,3 +795,34 @@ fn store_payment_reference_prevents_reentrancy() {
     }
     assert_eq!(store_count, 1, "payment_stored should be emitted exactly once");
 }
+
+// ---------------------------------------------------------------------------
+// Issue 496: Batch Lookup Caps
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #314)")]
+fn get_payments_rejects_batch_too_large() {
+    let (env, _gov, _gov_admins, settle_client, _settle_admins, _merchant) = setup_both();
+    
+    let mut refs = Vec::new(&env);
+    // Create MAX_PAYMENTS_BATCH + 1 elements
+    for i in 0..101u8 {
+        refs.push_back(BytesN::<32>::from_array(&env, &[i; 32]));
+    }
+    
+    settle_client.get_payments(&refs);
+}
+
+#[test]
+fn get_payments_accepts_max_batch_size() {
+    let (env, _gov, _gov_admins, settle_client, _settle_admins, _merchant) = setup_both();
+    
+    let mut refs = Vec::new(&env);
+    for i in 0..100u8 {
+        refs.push_back(BytesN::<32>::from_array(&env, &[i; 32]));
+    }
+    
+    let payments = settle_client.get_payments(&refs);
+    assert_eq!(payments.len(), 0); // No payments stored, but succeeds
+}

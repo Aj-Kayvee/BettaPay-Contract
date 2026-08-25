@@ -185,6 +185,13 @@ pub use types::{Bps, FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRu
 /// rounded-up legs exceed the gross; see `calculate_split` for that edge case.
 pub(crate) const MIN_PAYMENT_AMOUNT: i128 = 100;
 pub(crate) const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
+
+/// Default settlement delay period applied as a fallback (1 day equivalent in ledgers)
+pub const FALLBACK_SETTLEMENT_DELAY_LEDGER: u32 = 17280;
+
+/// Maximum number of payments that can be retrieved in a single batch lookup
+pub const MAX_PAYMENTS_BATCH: u32 = 100;
+
 /// Approximate ledgers per day on Stellar (~5s per ledger).
 pub(crate) const LEDGERS_PER_DAY: u32 = 17280;
 

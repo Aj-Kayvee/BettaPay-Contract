@@ -70,6 +70,7 @@ pub enum SettlementError {
     GovernanceCallFailed = 311,
     FeeExceedsGovernanceConfig = 312,
     AmountTooSmall = 313,
+    BatchTooLarge = 314,
 }
 
 const _: () = {
@@ -109,4 +110,5 @@ const _: () = {
         SettlementError::FeeExceedsGovernanceConfig as u32 >= error_codes::SETTLEMENT_RANGE_START
     );
     assert!(SettlementError::AmountTooSmall as u32 >= error_codes::SETTLEMENT_RANGE_START);
+    assert!(SettlementError::BatchTooLarge as u32 >= error_codes::SETTLEMENT_RANGE_START);
 };

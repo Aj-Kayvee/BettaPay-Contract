@@ -6,8 +6,8 @@ use crate::errors::SettlementError;
 use crate::storage::{assert_not_paused, is_merchant_registered_internal, read_rule_or_default};
 use crate::types::{DataKey, FeeSplit, PaymentRecord, SettlementRule};
 use crate::{
-    SettlementContract, SettlementContractClient, MIN_PAYMENT_AMOUNT, PAYMENT_TTL_BUMP,
-    PAYMENT_TTL_THRESHOLD,
+    SettlementContract, SettlementContractClient, MAX_PAYMENTS_BATCH, MIN_PAYMENT_AMOUNT,
+    PAYMENT_TTL_BUMP, PAYMENT_TTL_THRESHOLD,
 };
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
@@ -187,20 +187,19 @@ impl SettlementContract {
 
     /// Retrieve multiple payment records by a vector of references.
     ///
-    /// The returned vector preserves the input order. Each entry is `Some(payment)`
-    /// when a record exists for the corresponding reference and `None` otherwise.
-    pub fn get_payments(env: Env, references: Vec<BytesN<32>>) -> Vec<Option<PaymentRecord>> {
-        // `references.len()` is known upfront, so pre-allocating would avoid repeated
-        // reallocation as this vector grows. soroban-sdk 21.7.7's Vec<T> has no
-        // `with_capacity` constructor (only `new`, `from_array`, `from_slice`), so
-        // this is left as a potential optimization for a future SDK version.
-        let mut payments = Vec::new(&env);
-
-        for reference in references.iter() {
-            let payment = Self::get_payment_reference(env.clone(), reference.clone());
-            payments.push_back(payment);
+    /// The returned vector contains only records that exist.
+    pub fn get_payments(env: Env, refs: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
+        if refs.len() > MAX_PAYMENTS_BATCH {
+            panic_with_error!(env, SettlementError::BatchTooLarge);
         }
-
+        
+        let mut payments = Vec::new(&env);
+        for reference in refs.iter() {
+            let key = DataKey::Payment(reference);
+            if let Some(payment) = env.storage().persistent().get::<_, PaymentRecord>(&key) {
+                payments.push_back(payment);
+            }
+        }
         payments
     }
 }
