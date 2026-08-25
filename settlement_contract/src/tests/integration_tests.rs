@@ -643,8 +643,8 @@ fn full_lifecycle_configure_governance_then_process_payments() {
     // 7. Batch-read returns consistent ordering & length.
     let records = settle_client.get_payments(&refs);
     assert_eq!(records.len(), 4);
-    for i in 0..4u32 {
-        assert_eq!(records.get(i).unwrap().unwrap().amount, amounts[i as usize]);
+    for i in 0..amounts.len() as u32 {
+        assert_eq!(records.get(i).unwrap().amount, amounts[i as usize]);
     }
 }
 
@@ -690,4 +690,177 @@ fn store_payment_reference_accepts_amount_at_min() {
     assert_eq!(split.platform_fee_amount, 1);
     assert_eq!(split.network_fee_amount, 0);
     assert_eq!(split.merchant_amount, 99);
+}
+
+// ---------------------------------------------------------------------------
+// Issue 494: Normalized Error Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn calculate_fee_split_rejects_amount_zero() {
+    let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.calculate_fee_split(&merchant, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn calculate_fee_split_rejects_amount_negative() {
+    let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.calculate_fee_split(&merchant, &-10);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn calculate_fee_split_rejects_amount_below_min() {
+    let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.calculate_fee_split(&merchant, &(MIN_PAYMENT_AMOUNT - 1));
+}
+
+// ---------------------------------------------------------------------------
+// Issue 495: Reentrancy Guard
+// ---------------------------------------------------------------------------
+
+// A mock governance contract that attempts to reenter `store_payment_reference`
+// during the `get_fee_config` call.
+use soroban_sdk::{contract, contractimpl, IntoVal};
+
+#[contract]
+pub struct ReentrantGovernanceMock;
+
+#[contractimpl]
+impl ReentrantGovernanceMock {
+    pub fn get_fee_config(env: Env) -> Option<GovFeeConfig> {
+        // Attempt reentrancy if attack is armed
+        if let Some(target_settle) = env.storage().instance().get::<_, Address>(&Symbol::new(&env, "target_settle")) {
+            let settle_client = SettlementContractClient::new(&env, &target_settle);
+            let merchant: Address = env.storage().instance().get(&Symbol::new(&env, "target_merchant")).unwrap();
+            let reference: BytesN<32> = env.storage().instance().get(&Symbol::new(&env, "target_ref")).unwrap();
+            
+            // This should fail with DuplicatePaymentReference because the dummy record locks it
+            let _ = settle_client.try_store_payment_reference(&merchant, &reference, &1000);
+        }
+        None
+    }
+    
+    pub fn setup_attack(env: Env, target_settle: Address, target_merchant: Address, target_ref: BytesN<32>) {
+        env.storage().instance().set(&Symbol::new(&env, "target_settle"), &target_settle);
+        env.storage().instance().set(&Symbol::new(&env, "target_merchant"), &target_merchant);
+        env.storage().instance().set(&Symbol::new(&env, "target_ref"), &target_ref);
+    }
+}
+
+#[test]
+fn store_payment_reference_prevents_reentrancy() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let settle_admin = Address::generate(&env);
+    let settle_recovery = Address::generate(&env);
+    let settle_admins = soroban_sdk::vec![&env, settle_admin.clone()];
+    
+    let mock_gov_id = env.register_contract(None, ReentrantGovernanceMock);
+    let settle_id = env.register_contract(None, SettlementContract);
+    
+    let settle_client = SettlementContractClient::new(&env, &settle_id);
+    settle_client.init(&settle_admins, &1, &mock_gov_id, &settle_recovery);
+
+    let merchant = Address::generate(&env);
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[99u8; 32]);
+
+    // Configure the malicious mock to reenter with the same reference
+    env.invoke_contract::<()>(
+        &mock_gov_id,
+        &Symbol::new(&env, "setup_attack"),
+        soroban_sdk::vec![&env, settle_id.into_val(&env), merchant.into_val(&env), reference.into_val(&env)],
+    );
+
+    // This call triggers read_rule_or_default -> read_governance_fee_rule -> get_fee_config on our mock
+    settle_client.store_payment_reference(&merchant, &reference, &1000);
+
+    // Verify only one payment_stored event was emitted
+    let events = env.events().all();
+    let mut store_count = 0;
+    for i in 0..events.len() {
+        let (_contract, topics, _data) = events.get(i).unwrap();
+        if !topics.is_empty() {
+            let sym = Symbol::from_val(&env, &topics.get(0).unwrap());
+            if sym == Symbol::new(&env, "payment_stored") {
+                store_count += 1;
+            }
+        }
+    }
+    assert_eq!(store_count, 1, "payment_stored should be emitted exactly once");
+}
+
+// ---------------------------------------------------------------------------
+// Issue 496: Batch Lookup Caps
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #314)")]
+fn get_payments_rejects_batch_too_large() {
+    let (env, _gov, _gov_admins, settle_client, _settle_admins, _merchant) = setup_both();
+    
+    let mut refs = Vec::new(&env);
+    // Create MAX_PAYMENTS_BATCH + 1 elements
+    for i in 0..101u8 {
+        refs.push_back(BytesN::<32>::from_array(&env, &[i; 32]));
+    }
+    
+    settle_client.get_payments(&refs);
+}
+
+#[test]
+fn get_payments_accepts_max_batch_size() {
+    let (env, _gov, _gov_admins, settle_client, _settle_admins, _merchant) = setup_both();
+    
+    let mut refs = Vec::new(&env);
+    for i in 0..100u8 {
+        refs.push_back(BytesN::<32>::from_array(&env, &[i; 32]));
+    }
+    
+    let payments = settle_client.get_payments(&refs);
+    assert_eq!(payments.len(), 0); // No payments stored, but succeeds
+}
+
+// ---------------------------------------------------------------------------
+// Issue 497: Off-chain Settlement Readiness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn off_chain_settlement_readiness_logic() {
+    let (env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    // Rule with 10 ledger delay
+    let rule = SettlementRule {
+        platform_fee_bps: 100,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 10,
+        auto_settle: true,
+    };
+    settle_client.set_default_rule(&settle_admins, &rule);
+
+    let reference = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    env.ledger().with_mut(|l| l.sequence_number = 1000);
+    settle_client.store_payment_reference(&merchant, &reference, &10_000);
+
+    let record = settle_client.get_payment_reference(&reference).unwrap();
+    assert_eq!(record.ledger, 1000);
+    assert_eq!(record.settlement_delay_ledger, 10);
+    
+    // Demonstrate off-chain readiness check
+    let is_ready = |current_ledger: u32, r: &PaymentRecord| -> bool {
+        current_ledger >= r.ledger + r.settlement_delay_ledger
+    };
+
+    assert!(!is_ready(1009, &record), "Not ready before delay");
+    assert!(is_ready(1010, &record), "Ready at exact delay ledger");
+    assert!(is_ready(1011, &record), "Ready after delay");
 }

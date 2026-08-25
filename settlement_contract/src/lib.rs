@@ -31,6 +31,21 @@
 //! to securely organize persistent and instance storage, while applying TTL extensions to ensure
 //! active records remain available and do not expire prematurely.
 //!
+//! ## Settlement Boundary (Off-Chain Execution)
+//!
+//! This contract calculates and securely locks the fee split for each payment in a `PaymentRecord` and emits a 
+//! `payment_stored` event. It does **not** transfer tokens, hold funds, or expose an in-contract `settle` function.
+//!
+//! Settlement execution is intentionally designed to be **off-chain**:
+//! 1. **Indexers** listen to `payment_stored` events and read the `PaymentRecord` state.
+//! 2. **Readiness** is verified off-chain by evaluating if the current ledger sequence satisfies the delay: 
+//!    `current_ledger >= record.ledger + record.settlement_delay_ledger`.
+//! 3. **Execution** happens via a separate off-chain payout engine that processes transfers (batching where 
+//!    appropriate based on `auto_settle` preferences) and tracks settlement state externally.
+//!
+//! The in-contract flags (`settlement_delay_ledger`, `auto_settle`) are strictly informational directives 
+//! enforcing standardized agreement parameters for off-chain consumers; they do not trigger on-chain state transitions.
+//!
 //! ## Event Conventions
 //!
 //! Events are emitted via [`soroban_sdk::Env::events`]. To give off-chain
@@ -185,6 +200,13 @@ pub use types::{Bps, FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRu
 /// rounded-up legs exceed the gross; see `calculate_split` for that edge case.
 pub(crate) const MIN_PAYMENT_AMOUNT: i128 = 100;
 pub(crate) const MAX_SETTLEMENT_DELAY_LEDGER: u32 = 100_000;
+
+/// Default settlement delay period applied as a fallback (1 day equivalent in ledgers)
+pub const FALLBACK_SETTLEMENT_DELAY_LEDGER: u32 = 17280;
+
+/// Maximum number of payments that can be retrieved in a single batch lookup
+pub const MAX_PAYMENTS_BATCH: u32 = 100;
+
 /// Approximate ledgers per day on Stellar (~5s per ledger).
 pub(crate) const LEDGERS_PER_DAY: u32 = 17280;
 

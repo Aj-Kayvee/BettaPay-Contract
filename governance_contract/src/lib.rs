@@ -115,6 +115,18 @@
 //! | 17 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
 //! | 18 | `InvalidThreshold` | The provided multisig threshold is invalid |
 //! | 19 | `SameAdmin` | Transfer target is identical to the current admin set and threshold |
+//! | 5 | `Paused` | Contract is paused |
+//! | 6 | `InvalidAdmin` | Transfer target is zero-address or current admin |
+//! | 7 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
+//! | 8 | `RecoveryNotPending` | No recovery operation is currently pending |
+//! | 9 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
+//! | 13 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
+//! | 14 | `InvalidThreshold` | The provided multisig threshold is invalid |
+//! | 200 | `AnchorMissing` | Tried to remove an unregistered anchor |
+//! | 201 | `InvalidParamValue` | Supplied system parameter value is invalid or out of bounds |
+//! | 202 | `AlreadyPaused` | `pause` called while the contract was already paused |
+//! | 203 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
+//! | 204 | `SameAdmin` | Transfer target is identical to the current admin set and threshold |
 //!
 //! ## Event Conventions
 //!
@@ -232,10 +244,6 @@ enum DataKey {
 
     /// Storage key for the pause state flag.
     Paused,
-
-    /// Storage key for a scheduled operation.
-    /// Uses persistent storage, keyed by operation hash, to store execution timestamp.
-    ScheduledOperation(BytesN<32>),
 }
 
 // Discriminants below are pinned to `bettapay_common::error_codes` so that a
@@ -263,12 +271,6 @@ pub enum GovernanceError {
     InvalidRecoveryAddress = 7,
     RecoveryNotPending = 8,
     RecoveryDelayActive = 9,
-    /// The scheduled operation is not yet ready for execution.
-    ExecutionNotReady = 10,
-    /// The operation has not been scheduled.
-    OperationNotScheduled = 11,
-    /// The operation has already been scheduled.
-    OperationAlreadyScheduled = 12,
     /// The deployed WASM does not implement the required interface.
     InvalidWasmInterface = 13,
     /// The provided multisig threshold is invalid.
@@ -296,12 +298,6 @@ const _: () = {
     );
     assert!(GovernanceError::RecoveryNotPending as u32 == error_codes::RECOVERY_NOT_PENDING);
     assert!(GovernanceError::RecoveryDelayActive as u32 == error_codes::RECOVERY_DELAY_ACTIVE);
-    assert!(GovernanceError::ExecutionNotReady as u32 == error_codes::EXECUTION_NOT_READY);
-    assert!(GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED);
-    assert!(
-        GovernanceError::OperationAlreadyScheduled as u32
-            == error_codes::OPERATION_ALREADY_SCHEDULED
-    );
     assert!(GovernanceError::InvalidWasmInterface as u32 == error_codes::INVALID_WASM_INTERFACE);
     assert!(GovernanceError::InvalidThreshold as u32 == error_codes::INVALID_THRESHOLD);
     assert!(GovernanceError::AnchorMissing as u32 >= error_codes::GOVERNANCE_RANGE_START);
@@ -653,6 +649,11 @@ impl GovernanceContract {
     pub fn upsert_anchor(env: Env, signers: Vec<Address>, asset: Address, anchor: Address) {
         assert_not_paused(&env);
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        assert_not_zero(&env, &asset, GovernanceError::InvalidAdmin);
+        assert_not_zero(&env, &anchor, GovernanceError::InvalidAdmin);
+        if asset == anchor {
+            panic_with_error!(&env, GovernanceError::InvalidAdmin);
+        }
         let key = DataKey::Anchor(asset.clone());
         let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
@@ -1033,6 +1034,41 @@ mod tests {
         client.remove_anchor(&admins, &asset);
         assert_eq!(client.get_anchor(&asset), None);
         assert!(env.events().all().len() > before_remove);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_with_zero_address_asset() {
+        let (env, client, admins, _recovery) = setup();
+        let zero_address = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+        let anchor = Address::generate(&env);
+
+        client.upsert_anchor(&admins, &zero_address, &anchor);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_with_zero_address_anchor() {
+        let (env, client, admins, _recovery) = setup();
+        let asset = Address::generate(&env);
+        let zero_address = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+
+        client.upsert_anchor(&admins, &asset, &zero_address);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_where_asset_equals_anchor() {
+        let (env, client, admins, _recovery) = setup();
+        let asset = Address::generate(&env);
+
+        client.upsert_anchor(&admins, &asset, &asset);
     }
 
     #[test]

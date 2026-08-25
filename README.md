@@ -69,7 +69,7 @@ cargo test -p settlement_contract
 cargo test -p governance_contract
 
 # Run a specific test by name
-cargo test registers_merchant_and_persists_flag -p settlement_contract
+cargo test merchant_lifecycle_uses_canonical_topics -p settlement_contract
 ```
 
 ### Deploy to Testnet
@@ -82,19 +82,19 @@ bash scripts/deploy_testnet.sh
 # 1. Generate and fund a key
 soroban keys generate bettapay-admin --fund
 
-# 2. Build WASM
-cargo build --target wasm32-unknown-unknown --release
+# 2. Build and optimize WASM
+make optimize
 
 # 3. Deploy settlement contract
 SETTLEMENT_ID=$(soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/settlement_contract.wasm \
+  --wasm target/optimized/settlement_contract_opt.wasm \
   --source-account bettapay-admin \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015")
 
 # 4. Deploy governance contract
 GOVERNANCE_ID=$(soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/governance_contract.wasm \
+  --wasm target/optimized/governance_contract_opt.wasm \
   --source-account bettapay-admin \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015")
@@ -109,7 +109,7 @@ soroban contract invoke \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  init --admin "$ADMIN" --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
+  init --admins "[\"$ADMIN\"]" --threshold 1 --governance "$GOVERNANCE_ID" --recovery-address "$RECOVERY_ADDRESS"
 
 soroban contract invoke \
   --id "$GOVERNANCE_ID" \
@@ -117,7 +117,7 @@ soroban contract invoke \
   --rpc-url https://soroban-testnet.stellar.org \
   --network-passphrase "Test SDF Network ; September 2015" \
   -- \
-  init --admin "$ADMIN" --recovery-address "$RECOVERY_ADDRESS"
+  init --admins "[\"$ADMIN\"]" --threshold 1 --recovery-address "$RECOVERY_ADDRESS"
 ```
 
 ### Invoke Settlement Contract
