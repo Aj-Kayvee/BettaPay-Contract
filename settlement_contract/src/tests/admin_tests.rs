@@ -3,7 +3,7 @@
 
 use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal};
+use soroban_sdk::{Address, Env, FromVal, Symbol, TryFromVal};
 
 use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
 use bettapay_common::events::{AdminTransferred, PendingRecovery};
@@ -91,7 +91,8 @@ fn every_admin_writer_preserves_the_vector_shape() {
     // Timelocked transfer (the path that previously wrote a scalar Address).
     let (env, client, admins, _) = setup();
     let scheduled_admin = Address::generate(&env);
-    let operation = Operation::TransferAdmin(scheduled_admin.clone());
+    let scheduled_admins = soroban_sdk::vec![&env, scheduled_admin.clone()];
+    let operation = Operation::TransferAdmin(scheduled_admins, 1);
     client.schedule(
         &admins.get(0).unwrap(),
         &operation,
@@ -381,33 +382,19 @@ fn set_default_rule_rejects_fee_above_max_fee_bps() {
 
 #[test]
 fn executes_contract_wasm_upgrade_successfully() {
+    // After the interface check was added, empty wasm (no exports) is correctly
+    // rejected. This test verifies rejection and confirms the contract is intact.
     let (env, client, admins, _) = setup();
     let wasm = soroban_sdk::Bytes::from_slice(&env, &[]);
-    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
+    let bad_hash = env.deployer().upload_contract_wasm(wasm);
 
-    let before = env.events().all().len();
-    // Verifies the structural update pass completes without panicking
-    client.upgrade(&admins, &new_wasm_hash);
+    // Empty wasm has no `supports_interface` — upgrade must fail.
+    let result = client.try_upgrade(&admins, &bad_hash);
+    assert!(result.is_err(), "upgrade with non-conforming wasm must be rejected");
 
-    let events = env.events().all();
-    assert!(events.len() > before);
-
-    let event = events.last().unwrap();
-    let (_contract_id, topics, data) = event;
-
-    assert_eq!(
-        Symbol::from_val(&env, &topics.get(0).unwrap()),
-        Symbol::new(&env, "contract_upgraded")
-    );
-    assert_eq!(
-        BytesN::<32>::from_val(&env, &topics.get(1).unwrap()),
-        new_wasm_hash
-    );
-    assert_eq!(Address::from_val(&env, &data), admins.get(0).unwrap());
-
-    // Ensure the upgraded contract remains callable and retains its state.
-    let upgraded_client = SettlementContractClient::new(&env, &client.address);
-    assert_eq!(upgraded_client.get_admin(), admins);
+    // Contract remains operational after the rejected upgrade.
+    let live_client = SettlementContractClient::new(&env, &client.address);
+    assert_eq!(live_client.get_admin(), admins);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,4 +463,34 @@ fn bps_newtype_conversions_and_arithmetic_helpers_work() {
     let from_u32: Bps = 100u32.into();
     let to_u32: u32 = from_u32.into();
     assert_eq!(to_u32, 100);
+}
+
+// ---------------------------------------------------------------------------
+// InvalidWasmInterface: upgrade flow enforces supports_interface(1)
+// ---------------------------------------------------------------------------
+
+/// Uploading an empty Wasm (which has no `supports_interface` export) must be
+/// rejected with `InvalidWasmInterface` (code 13).
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn upgrade_rejects_wasm_missing_supports_interface() {
+    let (env, client, admins, _) = setup();
+    // Empty wasm has no exports — the probe call will trap, raising the typed error.
+    let bad_hash = env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &[]));
+    client.upgrade(&admins, &bad_hash);
+}
+
+/// Non-admin callers must be rejected with `Unauthorized` (code 3) before
+/// the interface check is even attempted.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn upgrade_rejects_non_admin_before_interface_check() {
+    let (env, client, _admins, _) = setup();
+    let non_admin = Address::generate(&env);
+    let bad_hash = env
+        .deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &[]));
+    client.upgrade(&soroban_sdk::vec![&env, non_admin], &bad_hash);
 }

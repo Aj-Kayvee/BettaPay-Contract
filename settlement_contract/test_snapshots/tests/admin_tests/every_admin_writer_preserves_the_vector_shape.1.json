@@ -54,7 +54,14 @@
                       "symbol": "TransferAdmin"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                      "vec": [
+                        {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                        }
+                      ]
+                    },
+                    {
+                      "u32": 1
                     }
                   ]
                 },
@@ -426,7 +433,14 @@
                       "symbol": "TransferAdmin"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                      "vec": [
+                        {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                        }
+                      ]
+                    },
+                    {
+                      "u32": 1
                     }
                   ]
                 },
@@ -452,7 +466,7 @@
                 "symbol": "op_scheduled"
               },
               {
-                "bytes": "591764cf6145c78b857d4b7d02ac14467deb33778cc6348a3c39478d9f204b6b"
+                "bytes": "3b5c54cc5e5c65edbfebfca0bea43d68415fa2b0b709254cfde5559eef51a15d"
               }
             ],
             "data": {
@@ -515,7 +529,14 @@
                   "symbol": "TransferAdmin"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                    }
+                  ]
+                },
+                {
+                  "u32": 1
                 }
               ]
             }
@@ -573,7 +594,7 @@
                 "symbol": "op_executed"
               },
               {
-                "bytes": "591764cf6145c78b857d4b7d02ac14467deb33778cc6348a3c39478d9f204b6b"
+                "bytes": "3b5c54cc5e5c65edbfebfca0bea43d68415fa2b0b709254cfde5559eef51a15d"
               }
             ],
             "data": "void"
