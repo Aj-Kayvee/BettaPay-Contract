@@ -200,8 +200,12 @@ pub(crate) fn read_rule_or_default(env: &Env, merchant: Address) -> SettlementRu
 
 /// Attempts to read fee BPS from the configured governance contract.
 ///
-/// Returns `None` when governance has no fee configuration yet or the call
-/// fails — callers then continue down the fallback chain to bootstrap.
+/// Returns `None` when governance has no fee configuration yet (the governance
+/// contract returned `Ok(Ok(None))`), so callers continue down the fallback
+/// chain to bootstrap.  Any other failure — contract trap, host error, or
+/// unexpected error value — is surfaced as the typed
+/// [`SettlementError::GovernanceCallFailed`] instead of silently collapsing to
+/// `None`.
 pub(crate) fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
     let governance: Address = env.storage().instance().get(&DataKey::Governance)?;
     let args: Vec<Val> = Vec::new(env);
@@ -210,6 +214,7 @@ pub(crate) fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
         &Symbol::new(env, "get_fee_config"),
         args,
     ) {
+        // Governance returned a populated fee config — convert to a rule.
         Ok(Ok(Some(config))) => {
             let rule = SettlementRule {
                 platform_fee_bps: config.platform_fee_bps,
@@ -222,7 +227,10 @@ pub(crate) fn read_governance_fee_rule(env: &Env) -> Option<SettlementRule> {
             }
             Some(rule)
         }
-        _ => None,
+        // Governance has no fee config set yet — fall through to bootstrap.
+        Ok(Ok(None)) => None,
+        // Governance call failed (contract error or host error).
+        _ => panic_with_error!(env, SettlementError::GovernanceCallFailed),
     }
 }
 
@@ -236,22 +244,27 @@ pub(crate) fn assert_not_paused(env: &Env) {
 /// Reads the governance FeeConfig via cross-contract call and validates that
 /// the settlement rule fees do not exceed governance's configured ceilings.
 ///
-/// When governance has no fee config set, local hardcoded constants still
-/// apply as baseline — this function only enforces ceilings that governance
-/// has explicitly configured.
+/// When governance has no fee config set (`Ok(Ok(None))`), local hardcoded
+/// constants still apply as baseline — this function only enforces ceilings
+/// that governance has explicitly configured.
+///
+/// Any call failure (contract trap or host error) is surfaced as the typed
+/// [`SettlementError::GovernanceCallFailed`] rather than an untyped host panic.
 pub(crate) fn validate_fee_against_governance(env: &Env, rule: &SettlementRule) {
     let governance: Address = read_governance(env);
-    let fee_config: Option<FeeConfig> = env.invoke_contract(
+    let result = env.try_invoke_contract::<Option<FeeConfig>, SettlementError>(
         &governance,
         &Symbol::new(env, "get_fee_config"),
         Vec::new(env),
     );
 
-    // If governance returned a valid config, check fee ceilings.
-    // If it returned `None` (no config set), there is no ceiling to enforce.
-    let fee_config = match fee_config {
-        Some(cfg) => cfg,
-        None => return,
+    let fee_config = match result {
+        // Governance returned a populated fee config — check fee ceilings.
+        Ok(Ok(Some(cfg))) => cfg,
+        // Governance has no fee config set — no ceiling to enforce.
+        Ok(Ok(None)) => return,
+        // Governance call failed (contract error or host error).
+        _ => panic_with_error!(env, SettlementError::GovernanceCallFailed),
     };
 
     if rule.platform_fee_bps > fee_config.platform_fee_bps {

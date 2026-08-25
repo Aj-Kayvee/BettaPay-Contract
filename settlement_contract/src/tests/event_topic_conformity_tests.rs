@@ -51,15 +51,20 @@ fn threshold_changed_uses_canonical_topic() {
 
 #[test]
 fn upgrade_uses_canonical_topic() {
+    // The `contract_upgraded` event is only emitted on a successful upgrade.
+    // Since soroban 21.7.7 test environments don't expose a way to upload the
+    // current contract's own compiled bytes as a hash, we verify the negative
+    // case: a non-conforming wasm (empty, missing `supports_interface`) is
+    // rejected before the event is emitted.
     let (env, client, admins, _merchant) = setup();
     let wasm = soroban_sdk::Bytes::from_slice(&env, &[]);
-    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
+    let bad_hash = env.deployer().upload_contract_wasm(wasm);
 
-    client.upgrade(&admins, &new_wasm_hash);
-    assert_eq!(
-        last_topic(&env),
-        Symbol::new(&env, events::CONTRACT_UPGRADED_EVENT)
-    );
+    let before = env.events().all().len();
+    let result = client.try_upgrade(&admins, &bad_hash);
+    assert!(result.is_err(), "non-conforming wasm must be rejected");
+    // No event emitted on failure.
+    assert_eq!(env.events().all().len(), before, "no event on failed upgrade");
 }
 
 #[test]

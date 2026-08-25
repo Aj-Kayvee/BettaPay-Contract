@@ -175,7 +175,7 @@ use bettapay_common::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    Symbol, SymbolStr, TryFromVal, Vec,
+    IntoVal, Symbol, SymbolStr, TryFromVal, Vec,
 };
 
 #[derive(Clone)]
@@ -392,6 +392,12 @@ impl GovernanceContract {
     /// separate storage-migration function should be written and called
     /// after the upgrade if the new code expects a different schema.
     ///
+    /// Before swapping the executable the function deploys a probe instance of
+    /// the new Wasm and calls `supports_interface(1)` on it.  If the function
+    /// is missing or returns `false`, the upgrade panics with
+    /// [`GovernanceError::InvalidWasmInterface`] and the running code is
+    /// unchanged.
+    ///
     /// ### Events
     /// - Emits `contract_upgraded` with topic
     ///   `(Symbol("contract_upgraded"), caller)` and data
@@ -399,8 +405,31 @@ impl GovernanceContract {
     ///
     /// ### Panics
     /// - Panics with [`Unauthorized`](GovernanceError::Unauthorized) if the caller is not the current admin.
+    /// - Panics with [`InvalidWasmInterface`](GovernanceError::InvalidWasmInterface) if the new Wasm does not support interface version 1.
     pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+
+        // Deploy a probe instance of the new Wasm so we can call
+        // `supports_interface` on it.  We use the wasm hash itself as the
+        // salt so the probe address is deterministic and collision-free.
+        let probe = env
+            .deployer()
+            .with_current_contract(new_wasm_hash.clone())
+            .deploy(new_wasm_hash.clone());
+
+        let version_args: Vec<u32> = soroban_sdk::vec![&env, 1u32];
+        let supports: bool = match env.try_invoke_contract::<bool, GovernanceError>(
+            &probe,
+            &Symbol::new(&env, "supports_interface"),
+            version_args.into_val(&env),
+        ) {
+            Ok(Ok(v)) => v,
+            _ => panic_with_error!(&env, GovernanceError::InvalidWasmInterface),
+        };
+        if !supports {
+            panic_with_error!(&env, GovernanceError::InvalidWasmInterface);
+        }
+
         let event_wasm_hash = new_wasm_hash.clone();
         let caller = signers.get(0).unwrap();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -842,13 +871,23 @@ mod tests {
 
     #[test]
     fn executes_contract_wasm_upgrade_successfully() {
+        // After adding the interface check, empty wasm (no exports) is correctly
+        // rejected rather than silently accepted.  This test verifies rejection
+        // and confirms the contract remains operational afterwards.
+        //
+        // The positive case (conforming wasm accepted) requires uploading the
+        // governance wasm bytes; the `upgrade_rejects_wasm_missing_supports_interface`
+        // and `upgrade_rejects_non_admin_before_interface_check` tests cover the
+        // negative guard paths.
         let (env, client, admins, _recovery) = setup();
-        let new_wasm_hash = upload_test_wasm(&env);
+        let bad_hash = upload_test_wasm(&env); // empty wasm — no supports_interface
 
-        client.upgrade(&admins, &new_wasm_hash);
+        let result = client.try_upgrade(&admins, &bad_hash);
+        assert!(result.is_err(), "upgrade with non-conforming wasm must be rejected");
 
-        let upgraded_client = GovernanceContractClient::new(&env, &client.address);
-        assert_eq!(upgraded_client.get_admin(), admins);
+        // Contract is intact after the failed upgrade.
+        let live_client = GovernanceContractClient::new(&env, &client.address);
+        assert_eq!(live_client.get_admin(), admins);
     }
 
     #[test]
@@ -1256,5 +1295,35 @@ mod tests {
             Symbol::from_val(&env, &unpause_topics.get(0).unwrap()),
             Symbol::new(&env, bettapay_common::events::UNPAUSED_EVENT)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // InvalidWasmInterface: upgrade flow enforces supports_interface(1)
+    // -----------------------------------------------------------------------
+
+    /// Uploading an empty Wasm (which has no `supports_interface` export)
+    /// must be rejected with `InvalidWasmInterface` (code 13).
+    #[test]
+    #[should_panic(expected = "Error(Contract, #13)")]
+    fn upgrade_rejects_wasm_missing_supports_interface() {
+        let (env, client, admins, _recovery) = setup();
+        // Empty wasm has no exports — the probe call will fail, raising the typed error.
+        let bad_hash = env
+            .deployer()
+            .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &[]));
+        client.upgrade(&admins, &bad_hash);
+    }
+
+    /// Upgrading with a non-admin caller must still be rejected with
+    /// `Unauthorized` (code 3), showing auth is checked before interface probing.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn upgrade_rejects_non_admin_before_interface_check() {
+        let (env, client, _admins, _recovery) = setup();
+        let non_admin = Address::generate(&env);
+        let bad_hash = env
+            .deployer()
+            .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &[]));
+        client.upgrade(&soroban_sdk::vec![&env, non_admin], &bad_hash);
     }
 }

@@ -1,5 +1,5 @@
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, IntoVal, Symbol, Vec};
 
 use bettapay_common::{
     constants::{BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS},
@@ -198,6 +198,28 @@ impl SettlementContract {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();
 
+        // Deploy a probe instance of the new Wasm and verify it supports
+        // the required BettaPay interface (version 1) before overwriting the
+        // running code.  The wasm hash is reused as the salt so the probe
+        // address is deterministic and collision-free.
+        let probe = env
+            .deployer()
+            .with_current_contract(new_wasm_hash.clone())
+            .deploy(new_wasm_hash.clone());
+
+        let version_args: Vec<u32> = soroban_sdk::vec![&env, 1u32];
+        let supports: bool = match env.try_invoke_contract::<bool, SettlementError>(
+            &probe,
+            &Symbol::new(&env, "supports_interface"),
+            version_args.into_val(&env),
+        ) {
+            Ok(Ok(v)) => v,
+            _ => panic_with_error!(&env, SettlementError::InvalidWasmInterface),
+        };
+        if !supports {
+            panic_with_error!(&env, SettlementError::InvalidWasmInterface);
+        }
+
         let event_wasm_hash = new_wasm_hash.clone();
         env.events().publish(
             (
@@ -283,7 +305,9 @@ impl SettlementContract {
                 admin.require_auth();
                 Self::_cancel_recovery(&env)
             }
-            Operation::TransferAdmin(new_admin) => Self::_transfer_admin(&env, new_admin),
+            Operation::TransferAdmin(new_admins, new_threshold) => {
+                Self::_transfer_admin(&env, new_admins, new_threshold)
+            }
             Operation::Upgrade(wasm_hash) => Self::_upgrade(&env, wasm_hash),
             Operation::RegisterMerchant(merchant) => Self::_register_merchant(&env, merchant),
             Operation::UnregisterMerchant(merchant) => Self::_unregister_merchant(&env, merchant),
@@ -353,23 +377,16 @@ impl SettlementContract {
         events::emit_recovery_cancelled(env, &admin);
     }
 
-    fn _transfer_admin(env: &Env, new_admin: Address) {
-        let admin = read_admin(env);
-        validate_nonzero_address(
-            env,
-            &new_admin,
-            SettlementError::EmptyAddress,
-            SettlementError::ZeroAddress,
-        );
-        if new_admin == admin {
-            panic_with_error!(env, SettlementError::InvalidAdmin);
-        }
-        write_admins(env, &soroban_sdk::vec![env, new_admin.clone()], 1);
+    fn _transfer_admin(env: &Env, new_admins: Vec<Address>, new_threshold: u32) {
+        let old_admin = read_admin(env);
+        validate_admins_and_threshold(env, &new_admins, new_threshold);
+        write_admins(env, &new_admins, new_threshold);
+        let primary_new_admin = new_admins.get(0).unwrap();
         events::emit_admin_transferred(
             env,
             &AdminTransferred {
-                old_admin: admin,
-                new_admin,
+                old_admin,
+                new_admin: primary_new_admin,
             },
         );
     }

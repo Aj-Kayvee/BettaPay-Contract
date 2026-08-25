@@ -11,7 +11,8 @@ fn scheduled_operation_executes_only_after_delay() {
     let (env, client, admins, _) = setup();
     let admin = admins.get(0).unwrap();
     let new_admin = Address::generate(&env);
-    let operation = Operation::TransferAdmin(new_admin.clone());
+    let new_admins = soroban_sdk::vec![&env, new_admin.clone()];
+    let operation = Operation::TransferAdmin(new_admins.clone(), 1);
 
     client.schedule(&admin, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
     assert!(client.try_execute(&operation).is_err());
@@ -103,4 +104,68 @@ fn expired_schedule_cannot_execute() {
     // it to `OperationNotScheduled`, so expiry is observed as a host panic in
     // the in-memory test environment.
     client.execute(&operation);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #2: TransferAdmin parity — timelocked path must accept the same
+// (Vec<Address>, u32) shape as the direct transfer_admin entry point.
+// ---------------------------------------------------------------------------
+
+/// Verifies that `Operation::TransferAdmin` now carries the full admin set +
+/// threshold, matching the direct `transfer_admin` entry point in shape and
+/// effect.  A multi-member admin set with threshold > 1 is used to confirm the
+/// timelocked path writes the complete configuration, not just a single address.
+#[test]
+fn timelocked_transfer_admin_parity_with_direct_path() {
+    use crate::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Ledger;
+    use soroban_sdk::Env;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let recovery = Address::generate(&env);
+
+    let governance = super::register_governance(&env);
+    let contract_id = env.register_contract(None, SettlementContract);
+    let client = SettlementContractClient::new(&env, &contract_id);
+
+    let initial_admins = soroban_sdk::vec![&env, a1.clone()];
+    client.init(&initial_admins, &1, &governance, &recovery);
+
+    // New admin set: three members, threshold 2 — same shape the direct path accepts.
+    let new_admins = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
+    let new_threshold: u32 = 2;
+
+    // --- Direct path ---
+    client.transfer_admin(&initial_admins, &new_admins, &new_threshold);
+    assert_eq!(client.get_admin(), new_admins, "direct path stores full admin set");
+    assert_eq!(client.get_threshold(), new_threshold, "direct path stores threshold");
+
+    // Reset back to single-admin so the timelock path starts from a clean state.
+    let reset_admins = soroban_sdk::vec![&env, a1.clone()];
+    client.transfer_admin(&new_admins, &reset_admins, &1);
+
+    // --- Timelocked path ---
+    let operation = Operation::TransferAdmin(new_admins.clone(), new_threshold);
+    client.schedule(&a1, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
+
+    env.ledger()
+        .with_mut(|ledger| ledger.timestamp += DEFAULT_TIMELOCK_DELAY_SECONDS);
+    client.execute(&operation);
+
+    assert_eq!(
+        client.get_admin(),
+        new_admins,
+        "timelocked path stores the same full admin set as the direct path"
+    );
+    assert_eq!(
+        client.get_threshold(),
+        new_threshold,
+        "timelocked path stores the same threshold as the direct path"
+    );
 }

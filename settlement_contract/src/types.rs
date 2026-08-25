@@ -1,5 +1,5 @@
 use bettapay_common::constants::BPS_DENOMINATOR;
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
 /// A type-safe wrapper around basis points (`u32`).
 ///
@@ -154,7 +154,12 @@ pub struct FeeConfig {
 pub enum Operation {
     UpdateGovernance(Address),
     CancelRecovery,
-    TransferAdmin(Address),
+    /// Carries the full new admin set and multisig threshold, matching the
+    /// shape of the direct `transfer_admin(signers, new_admins, new_threshold)`
+    /// entry point exactly. Both paths now accept the same data, closing the
+    /// storage-corruption window where the timelocked path could only carry a
+    /// single address.
+    TransferAdmin(Vec<Address>, u32),
     Upgrade(BytesN<32>),
     RegisterMerchant(Address),
     UnregisterMerchant(Address),
