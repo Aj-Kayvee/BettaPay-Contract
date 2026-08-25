@@ -643,8 +643,8 @@ fn full_lifecycle_configure_governance_then_process_payments() {
     // 7. Batch-read returns consistent ordering & length.
     let records = settle_client.get_payments(&refs);
     assert_eq!(records.len(), 4);
-    for i in 0..4u32 {
-        assert_eq!(records.get(i).unwrap().unwrap().amount, amounts[i as usize]);
+    for i in 0..amounts.len() as u32 {
+        assert_eq!(records.get(i).unwrap().amount, amounts[i as usize]);
     }
 }
 
@@ -726,6 +726,8 @@ fn calculate_fee_split_rejects_amount_below_min() {
 
 // A mock governance contract that attempts to reenter `store_payment_reference`
 // during the `get_fee_config` call.
+use soroban_sdk::{contract, contractimpl, IntoVal};
+
 #[contract]
 pub struct ReentrantGovernanceMock;
 
@@ -825,4 +827,40 @@ fn get_payments_accepts_max_batch_size() {
     
     let payments = settle_client.get_payments(&refs);
     assert_eq!(payments.len(), 0); // No payments stored, but succeeds
+}
+
+// ---------------------------------------------------------------------------
+// Issue 497: Off-chain Settlement Readiness
+// ---------------------------------------------------------------------------
+
+#[test]
+fn off_chain_settlement_readiness_logic() {
+    let (env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    // Rule with 10 ledger delay
+    let rule = SettlementRule {
+        platform_fee_bps: 100,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 10,
+        auto_settle: true,
+    };
+    settle_client.set_default_rule(&settle_admins, &rule);
+
+    let reference = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    env.ledger().with_mut(|l| l.sequence_number = 1000);
+    settle_client.store_payment_reference(&merchant, &reference, &10_000);
+
+    let record = settle_client.get_payment_reference(&reference).unwrap();
+    assert_eq!(record.ledger, 1000);
+    assert_eq!(record.settlement_delay_ledger, 10);
+    
+    // Demonstrate off-chain readiness check
+    let is_ready = |current_ledger: u32, r: &PaymentRecord| -> bool {
+        current_ledger >= r.ledger + r.settlement_delay_ledger
+    };
+
+    assert!(!is_ready(1009, &record), "Not ready before delay");
+    assert!(is_ready(1010, &record), "Ready at exact delay ledger");
+    assert!(is_ready(1011, &record), "Ready after delay");
 }
