@@ -100,6 +100,21 @@
 //! | 2 | `NotInitialized` | Admin not yet set |
 //! | 3 | `Unauthorized` | Caller is not the admin |
 //! | 4 | `InvalidFeeBps` | Fee value out of range or combined sum > 10 000 bps |
+//! | 5 | `AnchorMissing` | Tried to remove an unregistered anchor |
+//! | 6 | `Paused` | Contract is paused |
+//! | 7 | `InvalidAdmin` | Transfer target is zero-address or current admin |
+//! | 8 | `InvalidParamValue` | Supplied system parameter value is negative |
+//! | 9 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
+//! | 10 | `RecoveryNotPending` | No recovery operation is currently pending |
+//! | 11 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
+//! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
+//! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
+//! | 14 | `ExecutionNotReady` | The scheduled operation is not yet ready for execution |
+//! | 15 | `OperationNotScheduled` | The operation has not been scheduled |
+//! | 16 | `OperationAlreadyScheduled` | The operation has already been scheduled |
+//! | 17 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
+//! | 18 | `InvalidThreshold` | The provided multisig threshold is invalid |
+//! | 19 | `SameAdmin` | Transfer target is identical to the current admin set and threshold |
 //! | 5 | `Paused` | Contract is paused |
 //! | 6 | `InvalidAdmin` | Transfer target is zero-address or current admin |
 //! | 7 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
@@ -172,7 +187,7 @@ use bettapay_common::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
-    IntoVal, Symbol, SymbolStr, TryFromVal, Vec,
+    IntoVal, Symbol, Vec,
 };
 
 #[derive(Clone)]
@@ -555,10 +570,6 @@ impl GovernanceContract {
     }
 
     pub fn update_system_param(env: Env, signers: Vec<Address>, key: Symbol, value: i128) {
-        if symbol_len(&env, &key) > 32 {
-            panic_with_error!(&env, GovernanceError::InvalidParamValue);
-        }
-
         verify_admin_auth(&env, &signers, read_threshold(&env));
 
         if value < 0 {
@@ -583,10 +594,6 @@ impl GovernanceContract {
     }
 
     pub fn get_system_param(env: Env, key: Symbol) -> Option<i128> {
-        if symbol_len(&env, &key) > 32 {
-            panic_with_error!(&env, GovernanceError::InvalidParamValue);
-        }
-
         let storage_key = DataKey::SystemParam(key);
         if env.storage().persistent().has(&storage_key) {
             env.storage().persistent().extend_ttl(
@@ -782,17 +789,6 @@ fn assert_not_paused(env: &Env) {
     if storage::is_paused(env) {
         panic_with_error!(env, GovernanceError::Paused);
     }
-}
-
-/// Returns the character length of a `Symbol`.
-///
-/// `Symbol` has no `ToString`/`Display` impl available on the wasm target
-/// (soroban-sdk gates that behind `not(target_family = "wasm")`), so length
-/// is measured via `SymbolStr`, which is available on every target.
-fn symbol_len(env: &Env, key: &Symbol) -> usize {
-    SymbolStr::try_from_val(env, &key.to_symbol_val())
-        .map(|s| s.len())
-        .unwrap_or(0)
 }
 
 /// Shared test setup used across the main test module and the anchor_*
@@ -1194,11 +1190,10 @@ mod tests {
     // itself (SCSYMBOL_LIMIT) at construction time, not merely by an SDK
     // convenience check. `Symbol::new` below panics with
     // `Error(Value, InvalidInput)` before `update_system_param` is ever
-    // invoked, so this test necessarily observes the SDK/protocol-level
-    // panic rather than `GovernanceError::InvalidParamValue` — there is no
-    // public API path to construct an in-memory `Symbol` over 32 characters,
-    // so the contract's own length guard (`symbol_len` in this file, kept as
-    // defense-in-depth) can never actually be reached through it.
+    // invoked, so there is no public API path to construct an in-memory
+    // `Symbol` over 32 characters. The test documents this protocol-level
+    // invariant and ensures the contract does not assert a code path that
+    // cannot be reached through it.
     #[test]
     #[should_panic(expected = "Error(Value, InvalidInput)")]
     fn rejects_oversized_symbol_key() {
