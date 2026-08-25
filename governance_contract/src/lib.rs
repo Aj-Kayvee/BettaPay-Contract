@@ -661,6 +661,11 @@ impl GovernanceContract {
     pub fn upsert_anchor(env: Env, signers: Vec<Address>, asset: Address, anchor: Address) {
         assert_not_paused(&env);
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        assert_not_zero(&env, &asset, GovernanceError::InvalidAdmin);
+        assert_not_zero(&env, &anchor, GovernanceError::InvalidAdmin);
+        if asset == anchor {
+            panic_with_error!(&env, GovernanceError::InvalidAdmin);
+        }
         let key = DataKey::Anchor(asset.clone());
         let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
@@ -1052,6 +1057,41 @@ mod tests {
         client.remove_anchor(&admins, &asset);
         assert_eq!(client.get_anchor(&asset), None);
         assert!(env.events().all().len() > before_remove);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_with_zero_address_asset() {
+        let (env, client, admins, _recovery) = setup();
+        let zero_address = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+        let anchor = Address::generate(&env);
+
+        client.upsert_anchor(&admins, &zero_address, &anchor);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_with_zero_address_anchor() {
+        let (env, client, admins, _recovery) = setup();
+        let asset = Address::generate(&env);
+        let zero_address = Address::from_string(&String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+
+        client.upsert_anchor(&admins, &asset, &zero_address);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn rejects_upsert_anchor_where_asset_equals_anchor() {
+        let (env, client, admins, _recovery) = setup();
+        let asset = Address::generate(&env);
+
+        client.upsert_anchor(&admins, &asset, &asset);
     }
 
     #[test]
