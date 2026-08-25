@@ -9,6 +9,7 @@ pub mod conformity_tests;
 pub mod event_topic_conformity_tests;
 pub mod integration_tests;
 pub mod recovery_admin_set_tests;
+pub mod timelock_tests;
 
 use crate::*;
 use soroban_sdk::testutils::Address as _;
@@ -39,8 +40,8 @@ pub fn register_governance(env: &Env) -> Address {
 /// - `client`   — a `SettlementContractClient` bound to the registered contract.
 /// - `admins`   — the signer set (single admin, threshold 1) used for admin calls.
 /// - `merchant` — a freshly generated address that has **not** been registered;
-///                individual tests must call `client.register_merchant(&admins, &merchant)`
-///                when they need a registered merchant.
+///   individual tests must call `client.register_merchant(&admins, &merchant)`
+///   when they need a registered merchant.
 pub fn setup() -> (
     Env,
     SettlementContractClient<'static>,

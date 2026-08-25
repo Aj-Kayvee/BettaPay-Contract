@@ -6,7 +6,8 @@ use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal};
 
 use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
-use bettapay_common::events::AdminTransferred;
+use bettapay_common::events::{AdminTransferred, PendingRecovery};
+use bettapay_common::storage::CommonDataKey;
 
 use super::{register_governance, setup};
 
@@ -68,6 +69,65 @@ fn transfer_admin_updates_admin_address() {
     assert_eq!(client.get_admin(), admins);
     client.transfer_admin(&admins, &soroban_sdk::vec![&env, new_admin.clone()], &1);
     assert_eq!(client.get_admin(), soroban_sdk::vec![&env, new_admin]);
+}
+
+#[test]
+fn every_admin_writer_preserves_the_vector_shape() {
+    // Direct transfer.
+    let (env, client, admins, _) = setup();
+    let direct_admin = Address::generate(&env);
+    client.transfer_admin(&admins, &soroban_sdk::vec![&env, direct_admin.clone()], &1);
+    assert_eq!(client.get_admin(), soroban_sdk::vec![&env, direct_admin]);
+
+    // Recovery transfer.
+    let (env, client, _admins, _) = setup();
+    let recovery_admin = Address::generate(&env);
+    client.initiate_recovery(&recovery_admin);
+    env.ledger()
+        .with_mut(|ledger| ledger.timestamp += RECOVERY_DELAY_SECONDS);
+    client.execute_recovery();
+    assert_eq!(client.get_admin(), soroban_sdk::vec![&env, recovery_admin]);
+
+    // Timelocked transfer (the path that previously wrote a scalar Address).
+    let (env, client, admins, _) = setup();
+    let scheduled_admin = Address::generate(&env);
+    let operation = Operation::TransferAdmin(scheduled_admin.clone());
+    client.schedule(
+        &admins.get(0).unwrap(),
+        &operation,
+        &DEFAULT_TIMELOCK_DELAY_SECONDS,
+    );
+    env.ledger()
+        .with_mut(|ledger| ledger.timestamp += DEFAULT_TIMELOCK_DELAY_SECONDS);
+    client.execute(&operation);
+    assert_eq!(client.get_admin(), soroban_sdk::vec![&env, scheduled_admin]);
+}
+
+#[test]
+fn failed_recovery_keeps_pending_target() {
+    let (env, client, _admins, _) = setup();
+    let zero_admin = Address::from_string(&soroban_sdk::String::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
+    let pending = PendingRecovery {
+        new_admin: zero_admin.clone(),
+        execute_after: env.ledger().timestamp(),
+    };
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::PendingRecovery, &pending);
+    });
+
+    assert!(client.try_execute_recovery().is_err());
+    let retained: Option<PendingRecovery> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&CommonDataKey::PendingRecovery)
+    });
+    assert_eq!(retained.unwrap().new_admin, zero_admin);
 }
 
 #[test]

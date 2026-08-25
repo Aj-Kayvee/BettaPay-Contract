@@ -47,3 +47,5 @@ jobs:
 
       - name: Run script smoke tests
         run: make test_scripts
+      - name: Make All
+        run: make all
