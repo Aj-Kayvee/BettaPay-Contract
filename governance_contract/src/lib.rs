@@ -100,21 +100,18 @@
 //! | 2 | `NotInitialized` | Admin not yet set |
 //! | 3 | `Unauthorized` | Caller is not the admin |
 //! | 4 | `InvalidFeeBps` | Fee value out of range or combined sum > 10 000 bps |
-//! | 5 | `AnchorMissing` | Tried to remove an unregistered anchor |
-//! | 6 | `Paused` | Contract is paused |
-//! | 7 | `InvalidAdmin` | Transfer target is zero-address or current admin |
-//! | 8 | `InvalidParamValue` | Supplied system parameter value is invalid or out of bounds |
-//! | 9 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
-//! | 10 | `RecoveryNotPending` | No recovery operation is currently pending |
-//! | 11 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
-//! | 12 | `AlreadyPaused` | `pause` called while the contract was already paused |
-//! | 13 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
-//! | 14 | `ExecutionNotReady` | The scheduled operation is not yet ready for execution |
-//! | 15 | `OperationNotScheduled` | The operation has not been scheduled |
-//! | 16 | `OperationAlreadyScheduled` | The operation has already been scheduled |
-//! | 17 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
-//! | 18 | `InvalidThreshold` | The provided multisig threshold is invalid |
-//! | 19 | `SameAdmin` | Transfer target is identical to the current admin set and threshold |
+//! | 5 | `Paused` | Contract is paused |
+//! | 6 | `InvalidAdmin` | Transfer target is zero-address or current admin |
+//! | 7 | `InvalidRecoveryAddress` | Recovery address is zero-address or otherwise invalid |
+//! | 8 | `RecoveryNotPending` | No recovery operation is currently pending |
+//! | 9 | `RecoveryDelayActive` | Recovery delay period has not yet elapsed |
+//! | 13 | `InvalidWasmInterface` | The deployed WASM does not implement the required interface |
+//! | 14 | `InvalidThreshold` | The provided multisig threshold is invalid |
+//! | 200 | `AnchorMissing` | Tried to remove an unregistered anchor |
+//! | 201 | `InvalidParamValue` | Supplied system parameter value is invalid or out of bounds |
+//! | 202 | `AlreadyPaused` | `pause` called while the contract was already paused |
+//! | 203 | `AlreadyUnpaused` | `unpause` called while the contract was already unpaused |
+//! | 204 | `SameAdmin` | Transfer target is identical to the current admin set and threshold |
 //!
 //! ## Event Conventions
 //!
@@ -232,10 +229,6 @@ enum DataKey {
 
     /// Storage key for the pause state flag.
     Paused,
-
-    /// Storage key for a scheduled operation.
-    /// Uses persistent storage, keyed by operation hash, to store execution timestamp.
-    ScheduledOperation(BytesN<32>),
 }
 
 // Discriminants below are pinned to `bettapay_common::error_codes` so that a
@@ -263,12 +256,6 @@ pub enum GovernanceError {
     InvalidRecoveryAddress = 7,
     RecoveryNotPending = 8,
     RecoveryDelayActive = 9,
-    /// The scheduled operation is not yet ready for execution.
-    ExecutionNotReady = 10,
-    /// The operation has not been scheduled.
-    OperationNotScheduled = 11,
-    /// The operation has already been scheduled.
-    OperationAlreadyScheduled = 12,
     /// The deployed WASM does not implement the required interface.
     InvalidWasmInterface = 13,
     /// The provided multisig threshold is invalid.
@@ -296,12 +283,6 @@ const _: () = {
     );
     assert!(GovernanceError::RecoveryNotPending as u32 == error_codes::RECOVERY_NOT_PENDING);
     assert!(GovernanceError::RecoveryDelayActive as u32 == error_codes::RECOVERY_DELAY_ACTIVE);
-    assert!(GovernanceError::ExecutionNotReady as u32 == error_codes::EXECUTION_NOT_READY);
-    assert!(GovernanceError::OperationNotScheduled as u32 == error_codes::OPERATION_NOT_SCHEDULED);
-    assert!(
-        GovernanceError::OperationAlreadyScheduled as u32
-            == error_codes::OPERATION_ALREADY_SCHEDULED
-    );
     assert!(GovernanceError::InvalidWasmInterface as u32 == error_codes::INVALID_WASM_INTERFACE);
     assert!(GovernanceError::InvalidThreshold as u32 == error_codes::INVALID_THRESHOLD);
     assert!(GovernanceError::AnchorMissing as u32 >= error_codes::GOVERNANCE_RANGE_START);
