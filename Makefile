@@ -18,6 +18,10 @@ clean:
 	cargo clean
 	@rm -rf target/optimized
 
+.PHONY: fmt test check clippy test_scripts wasm_size all
+
+fmt:
+	cargo fmt --all -- --check
 .PHONY: fmt test check clippy all
 
 fmt:
@@ -30,6 +34,13 @@ check:
 	cargo check --workspace
 
 clippy:
-	cargo clippy --workspace -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+test_scripts:
+	bash scripts/tests/tooling_smoke_test.sh
+
+wasm_size: optimize
+	bash scripts/check_wasm_size.sh
+
+all: fmt check clippy test test_scripts wasm_size
 all: fmt check clippy test
