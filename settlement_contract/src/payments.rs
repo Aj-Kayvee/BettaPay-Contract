@@ -3,7 +3,10 @@ use soroban_sdk::{contractimpl, panic_with_error, Address, BytesN, Env, Symbol, 
 use bettapay_common::{constants::BPS_DENOMINATOR, events};
 
 use crate::errors::SettlementError;
-use crate::storage::{assert_not_paused, is_merchant_registered_internal, read_rule_or_default};
+use crate::storage::{
+    assert_not_paused, is_merchant_registered_and_bump_ttl, is_merchant_registered_internal,
+    read_rule_or_default,
+};
 use crate::types::{DataKey, FeeSplit, PaymentRecord, SettlementRule};
 use crate::{
     SettlementContract, SettlementContractClient, MIN_PAYMENT_AMOUNT, PAYMENT_TTL_BUMP,
@@ -84,7 +87,12 @@ impl SettlementContract {
     ) -> FeeSplit {
         assert_not_paused(&env);
 
-        if !is_merchant_registered_internal(&env, merchant.clone()) {
+        // This whole call only ever commits if `merchant.require_auth()` below
+        // succeeds (a panic reverts every storage change made in this
+        // invocation, this TTL bump included), so bumping here — ahead of the
+        // auth check — cannot be abused by a non-merchant caller to keep the
+        // marker warm: their call fails auth and nothing persists.
+        if !is_merchant_registered_and_bump_ttl(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
         merchant.require_auth();

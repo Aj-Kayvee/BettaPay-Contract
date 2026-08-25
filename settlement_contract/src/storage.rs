@@ -146,8 +146,31 @@ pub(crate) fn validate_nonzero_address(
     }
 }
 
-/// Returns whether a merchant has been registered and keeps the marker entry warm in storage.
+/// Returns whether a merchant has been registered.
+///
+/// TTL-neutral: does not touch the merchant marker's TTL. Use this from
+/// public/unauthenticated read paths (`is_merchant_registered`,
+/// `calculate_fee_split`) — those are callable by anyone for any merchant
+/// address, so if they bumped the TTL a third party could keep an arbitrary
+/// merchant's marker alive indefinitely, subverting natural eviction.
+/// Merchant- or admin-authenticated paths that need to keep an active
+/// merchant's marker warm should use
+/// [`is_merchant_registered_and_bump_ttl`] instead.
 pub(crate) fn is_merchant_registered_internal(env: &Env, merchant: Address) -> bool {
+    let key = DataKey::Merchant(merchant);
+    env.storage().persistent().has(&key)
+}
+
+/// Returns whether a merchant has been registered, keeping the marker entry
+/// warm in storage if so.
+///
+/// Only call this from a path that already required merchant or admin
+/// authentication for this action (e.g. `store_payment_reference`,
+/// `set_settlement_rule`) — never from a public/unauthenticated read, or a
+/// third party could use it as a liveness oracle to keep an arbitrary
+/// merchant's marker alive indefinitely. See
+/// [`is_merchant_registered_internal`] for the TTL-neutral read-only check.
+pub(crate) fn is_merchant_registered_and_bump_ttl(env: &Env, merchant: Address) -> bool {
     let key = DataKey::Merchant(merchant);
     let exists = env.storage().persistent().has(&key);
     if exists {
