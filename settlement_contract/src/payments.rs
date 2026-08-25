@@ -138,18 +138,14 @@ impl SettlementContract {
     /// # Panics
     ///
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
-    /// * [`AmountZero`](SettlementError::AmountZero) — if `amount` is zero.
-    /// * [`AmountNegative`](SettlementError::AmountNegative) — if `amount` is negative.
+    /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     pub fn calculate_fee_split(env: Env, merchant: Address, amount: i128) -> FeeSplit {
         if !is_merchant_registered_internal(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
-        if amount == 0 {
-            panic_with_error!(&env, SettlementError::AmountZero);
-        }
-        if amount < 0 {
-            panic_with_error!(&env, SettlementError::AmountNegative);
+        if amount < MIN_PAYMENT_AMOUNT {
+            panic_with_error!(env, SettlementError::AmountTooSmall);
         }
         let rule = read_rule_or_default(&env, merchant);
         calculate_split(&env, amount, &rule)

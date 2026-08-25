@@ -691,3 +691,31 @@ fn store_payment_reference_accepts_amount_at_min() {
     assert_eq!(split.network_fee_amount, 0);
     assert_eq!(split.merchant_amount, 99);
 }
+
+// ---------------------------------------------------------------------------
+// Issue 494: Normalized Error Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn calculate_fee_split_rejects_amount_zero() {
+    let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.calculate_fee_split(&merchant, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn calculate_fee_split_rejects_amount_negative() {
+    let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.calculate_fee_split(&merchant, &-10);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #313)")]
+fn calculate_fee_split_rejects_amount_below_min() {
+    let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.calculate_fee_split(&merchant, &(MIN_PAYMENT_AMOUNT - 1));
+}
