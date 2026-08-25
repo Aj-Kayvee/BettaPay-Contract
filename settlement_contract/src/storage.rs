@@ -26,6 +26,17 @@ pub(crate) fn read_admin(env: &Env) -> Address {
     storage::primary_admin(&read_admins(env)).unwrap()
 }
 
+/// Validates and writes the complete admin configuration in its canonical
+/// storage shape. Every admin-changing path must use this helper so the
+/// `Admin` key is always encoded as `Vec<Address>` alongside its threshold.
+pub(crate) fn write_admins(env: &Env, admins: &Vec<Address>, threshold: u32) {
+    validate_admins_and_threshold(env, admins, threshold);
+    env.storage().instance().set(&DataKey::Admin, admins);
+    env.storage()
+        .instance()
+        .set(&DataKey::Threshold, &threshold);
+}
+
 pub(crate) fn read_threshold(env: &Env) -> u32 {
     env.storage()
         .instance()

@@ -159,6 +159,7 @@ become.
 
 ```bash
 stellar contract invoke --id "$SETTLEMENT_ID" -- upgrade \
+  --signers '["G...ADMIN"]' \
   --new_wasm_hash "$NEW_WASM_HASH"
 ```
 
