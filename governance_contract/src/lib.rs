@@ -657,7 +657,7 @@ impl GovernanceContract {
         let key = DataKey::Anchor(asset.clone());
         let old_anchor: Option<Address> = env.storage().persistent().get(&key);
         env.storage().persistent().set(&key, &anchor.clone());
-        env.storage().persistent().extend_ttl(&key, 50_000, 100_000);
+        env.storage().persistent().extend_ttl(&key, ANCHOR_TTL_THRESHOLD, ANCHOR_TTL_BUMP);
         env.events().publish(
             (Symbol::new(&env, events::ANCHOR_UPSERTED_EVENT), asset),
             (old_anchor, anchor),
@@ -824,6 +824,7 @@ mod anchor_no_event_error_tests;
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::testutils::storage::Persistent;
     use soroban_sdk::{vec, Bytes, FromVal, String};
 
     fn setup() -> (
@@ -1080,6 +1081,46 @@ mod tests {
         client.upsert_anchor(&admins, &asset, &anchor);
         assert_eq!(client.get_anchor(&asset), Some(anchor.clone()));
         assert_eq!(client.get_anchor(&asset), Some(anchor));
+    }
+
+    #[test]
+    fn upsert_anchor_uses_same_ttl_policy_as_read() {
+        let (env, client, admins, _recovery) = setup();
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+        let seq = env.ledger().sequence();
+
+        client.upsert_anchor(&admins, &asset, &anchor);
+
+        let live_until_after_write = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Anchor(asset.clone()))
+        });
+
+        // The write path bumps with ANCHOR_TTL_BUMP (via extend_ttl with the
+        // ANCHOR_TTL threshold/bump pair), so the remaining TTL (live-until
+        // minus the current ledger) must clear the anchor bump policy.
+        assert!(
+            live_until_after_write - seq >= ANCHOR_TTL_BUMP,
+            "write path remaining TTL {} < ANCHOR_TTL_BUMP ({ANCHOR_TTL_BUMP})",
+            live_until_after_write - seq
+        );
+
+        assert_eq!(client.get_anchor(&asset), Some(anchor));
+
+        let live_until_after_read = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Anchor(asset.clone()))
+        });
+
+        // The read path uses the same ANCHOR_TTL_THRESHOLD / ANCHOR_TTL_BUMP,
+        // so it never shrinks the policy established by the write.
+        assert!(
+            live_until_after_read >= live_until_after_write,
+            "read path live-until ({live_until_after_read}) should not be below write path ({live_until_after_write})"
+        );
     }
 
     #[test]
