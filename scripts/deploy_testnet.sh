@@ -43,9 +43,7 @@ curl --silent --fail --show-error "https://friendbot.stellar.org/?addr=${ADMIN_A
 
 # Build contracts
 log_info "Building settlement and governance contracts..."
-cargo build --target wasm32-unknown-unknown --release \
-  -p settlement_contract \
-  -p governance_contract
+make optimize
 log_success "Build completed successfully."
 
 SETTLEMENT_WASM="${ROOT_DIR}/target/optimized/settlement_contract_opt.wasm"
