@@ -100,6 +100,24 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::DuplicatePaymentReference);
         }
 
+        // ISSUE 495: Reentrancy guard.
+        // We write a dummy record to storage immediately so that if the external 
+        // read_governance_fee_rule call results in a reentrant call back to this 
+        // contract, the `has` check above will catch it. This dummy record is 
+        // overwritten by the actual record at the end of this function.
+        let dummy_record = PaymentRecord {
+            amount: 0,
+            platform_fee_amount: 0,
+            network_fee_amount: 0,
+            merchant_amount: 0,
+            platform_fee_bps: 0,
+            network_fee_bps: 0,
+            ledger: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        env.storage().persistent().set(&payment_key, &dummy_record);
+
         let rule = read_rule_or_default(&env, merchant.clone());
         let split = calculate_split(&env, amount, &rule);
         let record = PaymentRecord {

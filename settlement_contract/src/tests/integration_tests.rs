@@ -719,3 +719,79 @@ fn calculate_fee_split_rejects_amount_below_min() {
     settle_client.register_merchant(&settle_admins, &merchant);
     settle_client.calculate_fee_split(&merchant, &(MIN_PAYMENT_AMOUNT - 1));
 }
+
+// ---------------------------------------------------------------------------
+// Issue 495: Reentrancy Guard
+// ---------------------------------------------------------------------------
+
+// A mock governance contract that attempts to reenter `store_payment_reference`
+// during the `get_fee_config` call.
+#[contract]
+pub struct ReentrantGovernanceMock;
+
+#[contractimpl]
+impl ReentrantGovernanceMock {
+    pub fn get_fee_config(env: Env) -> Option<GovFeeConfig> {
+        // Attempt reentrancy if attack is armed
+        if let Some(target_settle) = env.storage().instance().get::<_, Address>(&Symbol::new(&env, "target_settle")) {
+            let settle_client = SettlementContractClient::new(&env, &target_settle);
+            let merchant: Address = env.storage().instance().get(&Symbol::new(&env, "target_merchant")).unwrap();
+            let reference: BytesN<32> = env.storage().instance().get(&Symbol::new(&env, "target_ref")).unwrap();
+            
+            // This should fail with DuplicatePaymentReference because the dummy record locks it
+            let _ = settle_client.try_store_payment_reference(&merchant, &reference, &1000);
+        }
+        None
+    }
+    
+    pub fn setup_attack(env: Env, target_settle: Address, target_merchant: Address, target_ref: BytesN<32>) {
+        env.storage().instance().set(&Symbol::new(&env, "target_settle"), &target_settle);
+        env.storage().instance().set(&Symbol::new(&env, "target_merchant"), &target_merchant);
+        env.storage().instance().set(&Symbol::new(&env, "target_ref"), &target_ref);
+    }
+}
+
+#[test]
+fn store_payment_reference_prevents_reentrancy() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let settle_admin = Address::generate(&env);
+    let settle_recovery = Address::generate(&env);
+    let settle_admins = soroban_sdk::vec![&env, settle_admin.clone()];
+    
+    let mock_gov_id = env.register_contract(None, ReentrantGovernanceMock);
+    let settle_id = env.register_contract(None, SettlementContract);
+    
+    let settle_client = SettlementContractClient::new(&env, &settle_id);
+    settle_client.init(&settle_admins, &1, &mock_gov_id, &settle_recovery);
+
+    let merchant = Address::generate(&env);
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[99u8; 32]);
+
+    // Configure the malicious mock to reenter with the same reference
+    env.invoke_contract::<()>(
+        &mock_gov_id,
+        &Symbol::new(&env, "setup_attack"),
+        soroban_sdk::vec![&env, settle_id.into_val(&env), merchant.into_val(&env), reference.into_val(&env)],
+    );
+
+    // This call triggers read_rule_or_default -> read_governance_fee_rule -> get_fee_config on our mock
+    settle_client.store_payment_reference(&merchant, &reference, &1000);
+
+    // Verify only one payment_stored event was emitted
+    let events = env.events().all();
+    let mut store_count = 0;
+    for i in 0..events.len() {
+        let (_contract, topics, _data) = events.get(i).unwrap();
+        if !topics.is_empty() {
+            let sym = Symbol::from_val(&env, &topics.get(0).unwrap());
+            if sym == Symbol::new(&env, "payment_stored") {
+                store_count += 1;
+            }
+        }
+    }
+    assert_eq!(store_count, 1, "payment_stored should be emitted exactly once");
+}
