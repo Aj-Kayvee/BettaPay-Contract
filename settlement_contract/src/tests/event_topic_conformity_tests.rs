@@ -204,6 +204,9 @@ fn clear_settlement_rule_emits_only_one_event() {
     client.clear_settlement_rule(&admins, &merchant);
     let after = env.events().all().len();
 
+    // Only one event emitted: SETTLEMENT_RULE_CLEARED_EVENT.
+    // The bootstrap fallback event should NOT be emitted during this call.
+    assert_eq!(after - before, 1);
     assert_eq!(
         last_topic(&env),
         Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT)
