@@ -535,3 +535,10 @@ This diagram highlights the main interaction pattern: the backend and operators 
 ## Dependencies
 
 No cross-contract calls. Both contracts are independently deployable and stateless across each other. The backend services call them via Stellar RPC.
+
+## Security
+
+Found a security vulnerability? Please do **not** open a public GitHub issue.
+See [`SECURITY.md`](SECURITY.md) for the reporting process (GitHub Security
+Advisories preferred, email fallback), the vulnerability report template, the
+list of report owners, and our 90-day responsible disclosure window.
