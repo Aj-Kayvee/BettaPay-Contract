@@ -58,7 +58,14 @@
 //! cause of the emergency:
 //! - `upgrade` — deploy a fix
 //! - `transfer_admin` — rotate compromised keys
+//! - `change_threshold` — re-balance the admin multisig
 //! - `update_system_param` — adjust system configuration
+//! - `initiate_recovery` / `cancel_recovery` / `execute_recovery` — repair a
+//!   lost or corrupted admin set
+//!
+//! This matrix is pinned by `pause_blocks_fee_and_anchor_writes` and
+//! `pause_allows_admin_transfer_threshold_and_recovery`. See also
+//! [`adr/001-selective-pause-model.md`](https://github.com/Betta-Pay/BettaPay-Contract/blob/main/adr/001-selective-pause-model.md).
 //!
 //! ### Fee Configuration
 //! [`GovernanceContract::set_fee_config`] stores a [`FeeConfig`] struct that
@@ -1694,5 +1701,71 @@ mod tests {
             ttl >= READ_INSTANCE_TTL_BUMP,
             "expected get_admin to bump instance TTL to at least {READ_INSTANCE_TTL_BUMP}, got {ttl}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #516: reconciled pause matrix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pause_blocks_fee_and_anchor_writes() {
+        let (env, client, admins, _recovery) = setup();
+        client.pause(&admins);
+        assert!(client.is_paused());
+
+        let asset = Address::generate(&env);
+        let anchor = Address::generate(&env);
+        let cfg = FeeConfig {
+            platform_fee_bps: 120,
+            network_fee_bps: 35,
+        };
+
+        assert!(
+            client.try_set_fee_config(&admins, &cfg).is_err(),
+            "set_fee_config must be blocked while paused"
+        );
+        assert!(
+            client.try_upsert_anchor(&admins, &asset, &anchor).is_err(),
+            "upsert_anchor must be blocked while paused"
+        );
+        assert!(
+            client.try_remove_anchor(&admins, &asset).is_err(),
+            "remove_anchor must be blocked while paused"
+        );
+    }
+
+    #[test]
+    fn pause_allows_admin_transfer_threshold_and_recovery() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2.clone()];
+        let recovery_address = Address::generate(&env);
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.init(&admins, &1, &recovery_address);
+
+        client.pause(&admins);
+        assert!(client.is_paused());
+
+        // change_threshold (threshold 1 -> needs threshold + 1 = 2 signers)
+        client.change_threshold(&admins, &2);
+        assert_eq!(client.get_threshold(), 2);
+
+        // transfer_admin (threshold 2 -> needs 2 signers)
+        let new_a = Address::generate(&env);
+        client.transfer_admin(&admins, &vec![&env, new_a.clone()], &1);
+        assert_eq!(client.get_admin(), vec![&env, new_a.clone()]);
+
+        // recovery flow
+        let recovered = Address::generate(&env);
+        client.initiate_recovery(&recovered);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + RECOVERY_DELAY_SECONDS + 1);
+        client.execute_recovery();
+        assert_eq!(client.get_admin(), vec![&env, recovered.clone()]);
+        assert_eq!(client.get_threshold(), 1);
     }
 }
