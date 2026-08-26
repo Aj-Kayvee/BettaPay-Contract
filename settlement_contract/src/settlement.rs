@@ -85,7 +85,11 @@ impl SettlementContract {
 
         env.storage().persistent().remove(&key);
 
-        let fallback = read_rule_or_default(&env, merchant.clone());
+        let fallback = env
+            .storage()
+            .persistent()
+            .get::<_, SettlementRule>(&DataKey::DefaultRule)
+            .unwrap_or(BOOTSTRAP_DEFAULT_RULE);
 
         env.events().publish(
             (
