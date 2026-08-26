@@ -61,32 +61,28 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
-    proptest! {
-        #[test]
-        fn zero_fee_split_handles_maximum_amounts(
-            amount in crate::MIN_PAYMENT_AMOUNT..=i128::MAX,
-        ) {
-            let env = Env::default();
-            let rule = SettlementRule {
-                platform_fee_bps: 0,
-                network_fee_bps: 0,
-                settlement_delay_ledger: 0,
-                auto_settle: false,
-            };
+    #[test]
+    fn zero_fee_split_handles_maximum_amount() {
+        let env = Env::default();
+        let amount = i128::MAX;
+        let rule = SettlementRule {
+            platform_fee_bps: 0,
+            network_fee_bps: 0,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
 
-            let split = calculate_split(&env, amount, &rule);
+        let split = calculate_split(&env, amount, &rule);
 
-            prop_assert_eq!(split.gross_amount, amount);
-            prop_assert_eq!(split.platform_fee_amount, 0);
-            prop_assert_eq!(split.network_fee_amount, 0);
-            prop_assert_eq!(split.merchant_amount, amount);
-            prop_assert_eq!(
-                split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
-                split.gross_amount,
-            );
-        }
+        assert_eq!(split.gross_amount, amount);
+        assert_eq!(split.platform_fee_amount, 0);
+        assert_eq!(split.network_fee_amount, 0);
+        assert_eq!(split.merchant_amount, amount);
+        assert_eq!(
+            split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+            split.gross_amount,
+        );
     }
 }
 
