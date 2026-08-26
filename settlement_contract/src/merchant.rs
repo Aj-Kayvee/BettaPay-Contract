@@ -9,7 +9,8 @@ use crate::storage::{
 };
 use crate::types::{DataKey, SettlementRule};
 use crate::{
-    SettlementContract, SettlementContractClient, MERCHANT_TTL_BUMP, MERCHANT_TTL_THRESHOLD,
+    SettlementContract, SettlementContractClient, BOOTSTRAP_DEFAULT_RULE, MERCHANT_TTL_BUMP,
+    MERCHANT_TTL_THRESHOLD,
 };
 
 #[contractimpl]
@@ -85,13 +86,15 @@ impl SettlementContract {
         let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
         if let Some(old_rule) = old_rule {
             env.storage().persistent().remove(&rule_key);
-            env.events().publish(
-                (
-                    Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT),
-                    merchant.clone(),
-                ),
-                (admin.clone(), old_rule),
-            );
+            // Emit the same canonical event shape as clear_settlement_rule
+            // (issue #491): (admin, removed, fallback). The fallback is read
+            // directly from storage so no bootstrap_fallback event is emitted.
+            let fallback = env
+                .storage()
+                .persistent()
+                .get::<_, SettlementRule>(&DataKey::DefaultRule)
+                .unwrap_or(BOOTSTRAP_DEFAULT_RULE);
+            events::emit_settlement_rule_cleared(&env, &merchant, &admin, &old_rule, &fallback);
         }
 
         env.events().publish(
