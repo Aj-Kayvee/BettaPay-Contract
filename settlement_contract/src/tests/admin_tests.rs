@@ -95,11 +95,7 @@ fn every_admin_writer_preserves_the_vector_shape() {
     let scheduled_admin = Address::generate(&env);
     let scheduled_admins = soroban_sdk::vec![&env, scheduled_admin.clone()];
     let operation = Operation::TransferAdmin(scheduled_admins, 1);
-    client.schedule(
-        &admins.get(0).unwrap(),
-        &operation,
-        &DEFAULT_TIMELOCK_DELAY_SECONDS,
-    );
+    client.schedule(&admins, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
     env.ledger()
         .with_mut(|ledger| ledger.timestamp += DEFAULT_TIMELOCK_DELAY_SECONDS);
     client.execute(&operation);
