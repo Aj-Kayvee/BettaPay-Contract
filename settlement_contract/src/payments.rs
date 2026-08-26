@@ -4,8 +4,8 @@ use bettapay_common::{constants::BPS_DENOMINATOR, events};
 
 use crate::errors::SettlementError;
 use crate::storage::{
-    assert_not_paused, is_merchant_registered_and_bump_ttl, is_merchant_registered_internal,
-    read_rule_or_default,
+    assert_not_paused, assert_payments_readable, is_merchant_registered_and_bump_ttl,
+    is_merchant_registered_internal, read_rule_or_default,
 };
 use crate::types::{DataKey, FeeSplit, PaymentRecord, SettlementRule};
 use crate::{
@@ -302,12 +302,16 @@ impl SettlementContract {
     ///   record. Reads are gated behind the merchant's own authorization so
     ///   the gross/fee/net amounts cannot be probed by anyone who can guess
     ///   a reference (issue #492).
+    /// * [`PaymentOrphaned`](SettlementError::PaymentOrphaned) — if the
+    ///   merchant was unregistered, its payment records are orphaned and no
+    ///   longer readable (issue #490).
     pub fn get_payment_reference(
         env: Env,
         merchant: Address,
         reference: BytesN<32>,
     ) -> Option<PaymentRecord> {
         merchant.require_auth();
+        assert_payments_readable(&env, &merchant);
         let key = DataKey::Payment(merchant, reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
         if record.is_some() {
@@ -331,10 +335,14 @@ impl SettlementContract {
     ///
     /// * Auth failure — if the caller is not the merchant who owns the
     ///   records (issue #492).
+    /// * [`PaymentOrphaned`](SettlementError::PaymentOrphaned) — if the
+    ///   merchant was unregistered, its payment records are orphaned and no
+    ///   longer readable (issue #490).
     /// * [`BatchTooLarge`](SettlementError::BatchTooLarge) — if `refs` exceeds
     ///   [`MAX_PAYMENTS_BATCH`].
     pub fn get_payments(env: Env, merchant: Address, refs: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
         merchant.require_auth();
+        assert_payments_readable(&env, &merchant);
         if refs.len() > MAX_PAYMENTS_BATCH {
             panic_with_error!(env, SettlementError::BatchTooLarge);
         }

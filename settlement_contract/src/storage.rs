@@ -146,6 +146,25 @@ pub(crate) fn validate_nonzero_address(
     }
 }
 
+/// Panics with [`SettlementError::PaymentOrphaned`] when the merchant's
+/// payment records are no longer readable.
+///
+/// Policy (issue #490): unregistering a merchant orphans its payment
+/// records. `unregister_merchant` writes an `ArchivedMerchant` tombstone that
+/// survives re-registration, and a merchant that was never registered has no
+/// readable history either. A payment read therefore requires both a live
+/// merchant marker and no tombstone.
+pub(crate) fn assert_payments_readable(env: &Env, merchant: &Address) {
+    let registered = is_merchant_registered_internal(env, merchant.clone());
+    let archived = env
+        .storage()
+        .persistent()
+        .has(&DataKey::ArchivedMerchant(merchant.clone()));
+    if !registered || archived {
+        panic_with_error!(env, SettlementError::PaymentOrphaned);
+    }
+}
+
 /// Returns whether a merchant has been registered.
 ///
 /// TTL-neutral: does not touch the merchant marker's TTL. Use this from

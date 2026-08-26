@@ -876,6 +876,110 @@ fn get_payment_reference_owner_read_works() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue 490: Unregistering a merchant orphans its payment records
+// ---------------------------------------------------------------------------
+
+/// A merchant's payment records must stop being readable once the merchant is
+/// unregistered — no more post-unregister queries against records that are
+/// only waiting out their TTL.
+#[test]
+fn payments_of_unregistered_merchant_are_orphaned() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[31u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &1_000);
+
+    // While registered, the merchant can read its own record.
+    assert!(
+        settle_client
+            .get_payment_reference(&merchant, &reference)
+            .is_some(),
+        "registered merchant must be able to read its own payment"
+    );
+
+    settle_client.unregister_merchant(&settle_admins, &merchant);
+    assert!(!settle_client.is_merchant_registered(&merchant));
+
+    // Post-unregister reads are rejected with PaymentOrphaned (#315).
+    let orphaned = soroban_sdk::Error::from_contract_error(SettlementError::PaymentOrphaned as u32);
+    let single = settle_client.try_get_payment_reference(&merchant, &reference);
+    assert!(
+        matches!(single, Err(Ok(ref err)) if *err == orphaned),
+        "post-unregister single read must be rejected as orphaned"
+    );
+
+    let refs = soroban_sdk::vec![&env, reference];
+    let batch = settle_client.try_get_payments(&merchant, &refs);
+    assert!(
+        matches!(batch, Err(Ok(ref err)) if *err == orphaned),
+        "post-unregister batch read must be rejected as orphaned"
+    );
+}
+
+/// The orphaning must survive re-registration: a re-registered merchant must
+/// not be able to resurrect the payment history of its earlier registration.
+#[test]
+fn reregistered_merchant_cannot_resurrect_orphaned_payments() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[32u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &1_000);
+
+    settle_client.unregister_merchant(&settle_admins, &merchant);
+    settle_client.register_merchant(&settle_admins, &merchant);
+    assert!(settle_client.is_merchant_registered(&merchant));
+
+    // The tombstone outlives the registration cycle.
+    let result = settle_client.try_get_payment_reference(&merchant, &reference);
+    assert!(
+        matches!(
+            result,
+            Err(Ok(ref err))
+                if *err
+                    == soroban_sdk::Error::from_contract_error(
+                        SettlementError::PaymentOrphaned as u32
+                    )
+        ),
+        "re-registration must not resurrect orphaned payments"
+    );
+}
+
+/// The timelocked unregister path (Operation::UnregisterMerchant executed
+/// through the admin timelock) must orphan payments exactly like the direct
+/// unregister_merchant entry point.
+#[test]
+fn timelocked_unregister_also_orphans_payments() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    let admin = settle_admins.get(0).unwrap();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[33u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &1_000);
+
+    let operation = Operation::UnregisterMerchant(merchant.clone());
+    settle_client.schedule(&admin, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
+    env.ledger()
+        .with_mut(|ledger| ledger.timestamp += DEFAULT_TIMELOCK_DELAY_SECONDS);
+    settle_client.execute(&operation);
+
+    assert!(!settle_client.is_merchant_registered(&merchant));
+    let result = settle_client.try_get_payment_reference(&merchant, &reference);
+    assert!(
+        matches!(
+            result,
+            Err(Ok(ref err))
+                if *err
+                    == soroban_sdk::Error::from_contract_error(
+                        SettlementError::PaymentOrphaned as u32
+                    )
+        ),
+        "timelocked unregister must orphan payments too"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Issue 495: Reentrancy Guard
 // ---------------------------------------------------------------------------
 
@@ -960,7 +1064,8 @@ fn store_payment_reference_prevents_reentrancy() {
 #[test]
 #[should_panic(expected = "Error(Contract, #314)")]
 fn get_payments_rejects_batch_too_large() {
-    let (env, _gov, _gov_admins, settle_client, _settle_admins, merchant) = setup_both();
+    let (env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
 
     let mut refs = Vec::new(&env);
     // Create MAX_PAYMENTS_BATCH + 1 elements
@@ -973,7 +1078,8 @@ fn get_payments_rejects_batch_too_large() {
 
 #[test]
 fn get_payments_accepts_max_batch_size() {
-    let (env, _gov, _gov_admins, settle_client, _settle_admins, merchant) = setup_both();
+    let (env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
 
     let mut refs = Vec::new(&env);
     for i in 0..100u8 {
