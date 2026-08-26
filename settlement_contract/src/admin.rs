@@ -448,6 +448,12 @@ impl SettlementContract {
         );
     }
 
+    /// Internal method to unregister a merchant.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not currently registered.
     fn _unregister_merchant(env: &Env, merchant: Address) {
         assert_not_paused(env);
         let admin = read_admin(env);
