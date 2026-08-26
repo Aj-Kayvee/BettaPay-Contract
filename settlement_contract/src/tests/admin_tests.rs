@@ -308,6 +308,8 @@ fn register_merchant_rejects_admin_address() {
 #[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
+    
+    // Pause the contract to simulate an emergency state
     client.pause(&admins);
     assert!(client.is_paused());
 
