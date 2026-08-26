@@ -412,6 +412,48 @@ fn executes_contract_wasm_upgrade_successfully() {
 }
 
 // ---------------------------------------------------------------------------
+// change_threshold
+// ---------------------------------------------------------------------------
+
+// Issue #565: setting a threshold above the admin count must surface
+// `InvalidThreshold` (#14), not `Unauthorized` (#3) from the auth gate.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn change_threshold_above_admin_count_rejects_with_invalid_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let admins = soroban_sdk::vec![&env, a1.clone(), a2.clone()];
+    let recovery = Address::generate(&env);
+    let governance = register_governance(&env);
+    let contract_id = env.register_contract(None, SettlementContract);
+    let client = SettlementContractClient::new(&env, &contract_id);
+    client.init(&admins, &1, &governance, &recovery);
+
+    // Threshold 3 > admins.len() 2 — must fail with InvalidThreshold, not auth.
+    client.change_threshold(&admins, &3);
+}
+
+// Issue #565: threshold == 0 must also be rejected before the auth gate.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn change_threshold_zero_rejects_with_invalid_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let admins = soroban_sdk::vec![&env, a1.clone(), a2.clone()];
+    let recovery = Address::generate(&env);
+    let governance = register_governance(&env);
+    let contract_id = env.register_contract(None, SettlementContract);
+    let client = SettlementContractClient::new(&env, &contract_id);
+    client.init(&admins, &2, &governance, &recovery);
+
+    client.change_threshold(&admins, &0);
+}
+
+// ---------------------------------------------------------------------------
 // recovery
 // ---------------------------------------------------------------------------
 

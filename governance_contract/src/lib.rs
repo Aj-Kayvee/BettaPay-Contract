@@ -516,13 +516,13 @@ impl GovernanceContract {
     }
 
     pub fn change_threshold(env: Env, signers: Vec<Address>, new_threshold: u32) {
-        let current_threshold = read_threshold(&env);
-        verify_admin_auth(&env, &signers, current_threshold + 1);
-
         let admins = read_admins(&env);
         if new_threshold == 0 || new_threshold > admins.len() {
             panic_with_error!(&env, GovernanceError::InvalidThreshold);
         }
+
+        let current_threshold = read_threshold(&env);
+        verify_admin_auth(&env, &signers, current_threshold + 1);
 
         env.storage()
             .instance()
@@ -1325,6 +1325,46 @@ mod tests {
         // Current threshold is 1, needs 2 signatures for change_threshold, but only 1 provided.
         let single_signer = vec![&env, a1.clone()];
         client.change_threshold(&single_signer, &2);
+    }
+
+    // Issue #565: setting a threshold above the admin count must surface
+    // `InvalidThreshold` (#14), not `Unauthorized` (#3) from the auth gate.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #14)")]
+    fn change_threshold_above_admin_count_rejects_with_invalid_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2.clone()];
+        let recovery = Address::generate(&env);
+
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.init(&admins, &1, &recovery);
+
+        // Threshold 3 > admins.len() 2 — must fail with InvalidThreshold, not auth.
+        client.change_threshold(&admins, &3);
+    }
+
+    // Issue #565: threshold == 0 must also be rejected before the auth gate.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #14)")]
+    fn change_threshold_zero_rejects_with_invalid_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let admins = vec![&env, a1.clone(), a2.clone()];
+        let recovery = Address::generate(&env);
+
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+        client.init(&admins, &2, &recovery);
+
+        client.change_threshold(&admins, &0);
     }
 
     #[test]
