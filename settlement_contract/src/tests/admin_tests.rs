@@ -315,7 +315,7 @@ fn set_default_rule_rejected_when_paused() {
 // ---------------------------------------------------------------------------
 
 // Both fees are independently capped at MAX_FEE_BPS (5000, i.e. 50%), even
-// before governance has configured a FeeConfig - settlement no longer relies
+// before governance has configured a GovFeeConfig - settlement no longer relies
 // solely on `validate_fee_against_governance` (which is a no-op with no
 // governance config set) to keep per-fee values below 100%.
 #[test]

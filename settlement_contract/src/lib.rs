@@ -182,7 +182,7 @@ mod tests;
 use soroban_sdk::contract;
 
 pub use errors::SettlementError;
-pub use types::{Bps, FeeConfig, FeeSplit, Operation, PaymentRecord, SettlementRule};
+pub use types::{Bps, FeeSplit, GovFeeConfig, Operation, PaymentRecord, SettlementRule};
 
 /// Minimum gross payment amount, in the asset's smallest unit.
 ///
