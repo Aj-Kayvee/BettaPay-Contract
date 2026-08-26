@@ -74,8 +74,9 @@
 //! payload shapes defined in [`bettapay_common::events`] so an indexer can
 //! decode them identically no matter which contract published them.
 //! - Each entry point emits exactly the events tied to the state change it
-//!   performs; no two events emitted by the same call describe the same
-//!   logical change.
+//!   performs. Usually, no two events emitted by the same call describe the
+//!   same logical change, though exceptions exist (e.g., `_set_settlement_rule`
+//!   emits both `bootstrap_fallback` and `settlement_rule_updated` when falling back).
 //!
 //! ## Upgrade Process
 //!
@@ -120,6 +121,7 @@
 //! - `transfer_admin` — rotate compromised keys
 //! - `initiate_recovery` / `cancel_recovery` / `execute_recovery` — the
 //!   admin-recovery flow itself must keep working while paused
+//! - `schedule` / `execute` / `cancel` — scheduled operations must proceed
 //!
 //! ## Event Convention
 //!

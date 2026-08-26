@@ -864,3 +864,42 @@ fn off_chain_settlement_readiness_logic() {
     assert!(is_ready(1010, &record), "Ready at exact delay ledger");
     assert!(is_ready(1011, &record), "Ready after delay");
 }
+
+#[test]
+fn set_settlement_rule_emits_fallback_and_updated_events() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 120,
+        network_fee_bps: 20,
+        settlement_delay_ledger: 10,
+        auto_settle: false,
+    };
+    settle_client.set_settlement_rule(&settle_admins, &merchant, &rule);
+
+    let events = env.events().all();
+    let mut fallback_found = false;
+    let mut update_found = false;
+    let mut last_event_sym = Symbol::new(&env, "");
+
+    for i in 0..events.len() {
+        let (_contract, topics, _data) = events.get(i).unwrap();
+        if topics.is_empty() {
+            continue;
+        }
+        let sym = Symbol::from_val(&env, &topics.get(0).unwrap());
+        if sym == Symbol::new(&env, bettapay_common::events::BOOTSTRAP_FALLBACK_EVENT) {
+            fallback_found = true;
+            last_event_sym = sym;
+        } else if sym == Symbol::new(&env, bettapay_common::events::SETTLEMENT_RULE_UPDATED_EVENT) {
+            update_found = true;
+            assert!(fallback_found, "bootstrap_fallback must precede settlement_rule_updated");
+            assert_eq!(last_event_sym, Symbol::new(&env, bettapay_common::events::BOOTSTRAP_FALLBACK_EVENT), "events must be sequential");
+            last_event_sym = sym;
+        }
+    }
+
+    assert!(fallback_found, "bootstrap_fallback event missing");
+    assert!(update_found, "settlement_rule_updated event missing");
+}
