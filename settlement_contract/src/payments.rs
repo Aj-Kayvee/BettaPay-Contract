@@ -242,11 +242,19 @@ impl SettlementContract {
     ///
     /// The reference is resolved within the merchant's own namespace, so the
     /// same reference held by a different merchant is not returned.
+    ///
+    /// # Panics
+    ///
+    /// * Auth failure — if the caller is not the merchant who owns the
+    ///   record. Reads are gated behind the merchant's own authorization so
+    ///   the gross/fee/net amounts cannot be probed by anyone who can guess
+    ///   a reference (issue #492).
     pub fn get_payment_reference(
         env: Env,
         merchant: Address,
         reference: BytesN<32>,
     ) -> Option<PaymentRecord> {
+        merchant.require_auth();
         let key = DataKey::Payment(merchant, reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
         if record.is_some() {
@@ -265,7 +273,15 @@ impl SettlementContract {
     ///
     /// References are resolved within the merchant's own namespace and the
     /// returned vector contains only records that exist.
+    ///
+    /// # Panics
+    ///
+    /// * Auth failure — if the caller is not the merchant who owns the
+    ///   records (issue #492).
+    /// * [`BatchTooLarge`](SettlementError::BatchTooLarge) — if `refs` exceeds
+    ///   [`MAX_PAYMENTS_BATCH`].
     pub fn get_payments(env: Env, merchant: Address, refs: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
+        merchant.require_auth();
         if refs.len() > MAX_PAYMENTS_BATCH {
             panic_with_error!(env, SettlementError::BatchTooLarge);
         }

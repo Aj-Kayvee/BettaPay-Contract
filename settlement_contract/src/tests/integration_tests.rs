@@ -775,6 +775,64 @@ fn same_merchant_duplicate_reference_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue 492: Payment-record reads are gated behind merchant auth
+// ---------------------------------------------------------------------------
+
+/// A caller that is not the merchant must not be able to read the merchant's
+/// payment record. Auth mocking is disabled for the read so the merchant's
+/// `require_auth()` ownership check is actually enforced rather than mocked
+/// away.
+#[test]
+fn get_payment_reference_rejects_unauthenticated_caller() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[21u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &1_000);
+
+    // Turn off auth mocking: no authorization entries exist, so the merchant
+    // ownership check must reject the read.
+    env.set_auths(&[]);
+    let result = settle_client.try_get_payment_reference(&merchant, &reference);
+    assert!(
+        result.is_err(),
+        "unauthenticated payment read must be rejected"
+    );
+
+    // The batch read is gated identically.
+    let refs = soroban_sdk::vec![&env, reference];
+    let batch_result = settle_client.try_get_payments(&merchant, &refs);
+    assert!(
+        batch_result.is_err(),
+        "unauthenticated batch read must be rejected"
+    );
+}
+
+/// The merchant who owns the records can always read them back.
+#[test]
+fn get_payment_reference_owner_read_works() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[22u8; 32]);
+    let split = settle_client.store_payment_reference(&merchant, &reference, &10_000);
+
+    // The merchant's own read succeeds and returns the stored economics.
+    let record = settle_client
+        .get_payment_reference(&merchant, &reference)
+        .expect("owner read must succeed");
+    assert_eq!(record.merchant, merchant);
+    assert_eq!(record.amount, 10_000);
+    assert_eq!(record.merchant_amount, split.merchant_amount);
+
+    // Batch read for the owner works too.
+    let refs = soroban_sdk::vec![&env, reference];
+    let records = settle_client.get_payments(&merchant, &refs);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records.get(0).unwrap().amount, 10_000);
+}
+
+// ---------------------------------------------------------------------------
 // Issue 495: Reentrancy Guard
 // ---------------------------------------------------------------------------
 
