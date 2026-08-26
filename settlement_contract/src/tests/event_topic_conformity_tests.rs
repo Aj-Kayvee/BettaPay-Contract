@@ -14,7 +14,8 @@
 
 use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal, Val};
 
 use bettapay_common::events;
 
@@ -24,6 +25,91 @@ use super::{register_governance, setup};
 fn last_topic(env: &Env) -> Symbol {
     let (_, topics, _) = env.events().all().last().unwrap();
     Symbol::from_val(env, &topics.get(0).unwrap())
+}
+
+/// Returns the data payload of the most recent `settlement_rule_cleared`
+/// event emitted so far.
+fn last_settlement_rule_cleared_data(env: &Env) -> Val {
+    let events = env.events().all();
+    let mut found = None;
+    for i in 0..events.len() {
+        let (_contract, topics, data) = events.get(i).unwrap();
+        if !topics.is_empty()
+            && Symbol::from_val(env, &topics.get(0).unwrap())
+                == Symbol::new(env, events::SETTLEMENT_RULE_CLEARED_EVENT)
+        {
+            found = Some(data);
+        }
+    }
+    found.expect("settlement_rule_cleared event must have been emitted")
+}
+
+/// Issue #491: `clear_settlement_rule` used to emit `(admin, removed, fallback)`
+/// while the unregister path emitted `(admin, old_rule)` under the same
+/// `settlement_rule_cleared` topic — two arities for one event name, which
+/// breaks indexers. Both paths now publish through the shared
+/// `bettapay_common::events::emit_settlement_rule_cleared` helper, so the two
+/// events must carry the same topic and serialize byte-identically.
+#[test]
+fn settlement_rule_cleared_data_is_identical_across_both_paths() {
+    let (env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 250,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 0,
+        auto_settle: false,
+    };
+    let default_rule = SettlementRule {
+        platform_fee_bps: 150,
+        network_fee_bps: 30,
+        settlement_delay_ledger: 0,
+        auto_settle: false,
+    };
+    client.set_settlement_rule(&admins, &merchant, &rule);
+    client.set_default_rule(&admins, &default_rule);
+
+    // Path 1: explicit clear_settlement_rule.
+    client.clear_settlement_rule(&admins, &merchant);
+    let data_clear = last_settlement_rule_cleared_data(&env);
+
+    // Path 2: unregister_merchant removing a merchant that still has a rule.
+    client.set_settlement_rule(&admins, &merchant, &rule);
+    client.unregister_merchant(&admins, &merchant);
+    let data_unregister = last_settlement_rule_cleared_data(&env);
+
+    // Same topic on both paths.
+    let events = env.events().all();
+    let mut cleared_topics = 0;
+    for i in 0..events.len() {
+        let (_contract, topics, _data) = events.get(i).unwrap();
+        if !topics.is_empty()
+            && Symbol::from_val(&env, &topics.get(0).unwrap())
+                == Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT)
+        {
+            cleared_topics += 1;
+        }
+    }
+    assert_eq!(cleared_topics, 2, "both paths must emit the same topic");
+
+    // Byte-identical serialization — the acceptance criterion for #491.
+    assert_eq!(
+        data_clear.to_xdr(&env),
+        data_unregister.to_xdr(&env),
+        "both removal paths must serialize the settlement_rule_cleared \
+         payload identically",
+    );
+
+    // The payload still decodes as the canonical (admin, removed, fallback)
+    // triple, with the expected values.
+    let (admin, removed, fallback): (Address, SettlementRule, SettlementRule) =
+        TryFromVal::try_from_val(&env, &data_clear).unwrap();
+    assert_eq!(admin, admins.get(0).unwrap());
+    assert_eq!(removed.platform_fee_bps, 250);
+    assert_eq!(removed.network_fee_bps, 50);
+    assert_eq!(fallback.platform_fee_bps, 150);
+    assert_eq!(fallback.network_fee_bps, 30);
 }
 
 #[test]

@@ -94,13 +94,8 @@ impl SettlementContract {
             .get::<_, SettlementRule>(&DataKey::DefaultRule)
             .unwrap_or(BOOTSTRAP_DEFAULT_RULE);
 
-        env.events().publish(
-            (
-                Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT),
-                merchant,
-            ),
-            (admin, removed, fallback),
-        );
+        // Canonical event shape shared with the unregister path (issue #491).
+        events::emit_settlement_rule_cleared(&env, &merchant, &admin, &removed, &fallback);
     }
 
     pub fn set_default_rule(env: Env, signers: Vec<Address>, new_rule: SettlementRule) {
