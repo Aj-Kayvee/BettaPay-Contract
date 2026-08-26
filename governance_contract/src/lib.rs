@@ -1214,6 +1214,7 @@ mod tests {
                     }),
         ) {
             let env = Env::default();
+            env.mock_all_auths();
             let admin = Address::generate(&env);
             let recovery = Address::generate(&env);
             let admins = vec![&env, admin];
@@ -1254,6 +1255,7 @@ mod tests {
                 }
             };
             let env = Env::default();
+            env.mock_all_auths();
             let admin = Address::generate(&env);
             let recovery = Address::generate(&env);
             let admins = vec![&env, admin];
