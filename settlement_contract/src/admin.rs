@@ -412,6 +412,14 @@ impl SettlementContract {
             SettlementError::ZeroAddress,
         );
         let admin = read_admin(env);
+        
+        // Prevent an admin from being registered as a merchant
+        let admins = read_admins(env);
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == merchant {
+                panic_with_error!(env, SettlementError::InvalidAdmin);
+            }
+        }
 
         let key = DataKey::Merchant(merchant.clone());
         if env.storage().persistent().has(&key) {

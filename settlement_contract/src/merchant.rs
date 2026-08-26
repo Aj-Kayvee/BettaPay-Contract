@@ -27,6 +27,15 @@ impl SettlementContract {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         let admin = signers.get(0).unwrap();
 
+        // Prevent an admin from being registered as a merchant
+        use crate::storage::read_admins;
+        let admins = read_admins(&env);
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == merchant {
+                panic_with_error!(&env, SettlementError::InvalidAdmin);
+            }
+        }
+
         let key = DataKey::Merchant(merchant.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, SettlementError::MerchantExists);
