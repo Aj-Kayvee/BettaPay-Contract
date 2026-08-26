@@ -4,7 +4,7 @@ use bettapay_common::events;
 
 use crate::errors::SettlementError;
 use crate::storage::{
-    assert_not_paused, is_merchant_registered_internal, read_threshold, validate_nonzero_address,
+    assert_not_paused, is_merchant_registered_read, read_threshold, validate_nonzero_address,
     verify_admin_auth,
 };
 use crate::types::{DataKey, SettlementRule};
@@ -88,6 +88,6 @@ impl SettlementContract {
         if !env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, SettlementError::NotInitialized);
         }
-        is_merchant_registered_internal(&env, merchant)
+        is_merchant_registered_read(&env, merchant)
     }
 }

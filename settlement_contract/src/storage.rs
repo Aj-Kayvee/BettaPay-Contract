@@ -146,6 +146,15 @@ pub(crate) fn validate_nonzero_address(
     }
 }
 
+/// Returns whether a merchant has been registered **without** touching TTL.
+///
+/// This is the TTL-neutral read used by public query entry points so that a
+/// read-only check never mutates storage.
+pub(crate) fn is_merchant_registered_read(env: &Env, merchant: Address) -> bool {
+    let key = DataKey::Merchant(merchant);
+    env.storage().persistent().has(&key)
+}
+
 /// Returns whether a merchant has been registered and keeps the marker entry warm in storage.
 pub(crate) fn is_merchant_registered_internal(env: &Env, merchant: Address) -> bool {
     let key = DataKey::Merchant(merchant);

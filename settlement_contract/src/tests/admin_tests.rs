@@ -2,8 +2,10 @@
 //! `init`, `transfer_admin`, `pause`, `unpause`, `upgrade`, `recovery`.
 
 use crate::*;
+use crate::types::DataKey;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, Env, FromVal, Symbol, TryFromVal};
+use soroban_sdk::testutils::storage::Persistent as _;
 
 use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
 use bettapay_common::events::{AdminTransferred, PendingRecovery};
@@ -493,4 +495,36 @@ fn upgrade_rejects_non_admin_before_interface_check() {
         .deployer()
         .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &[]));
     client.upgrade(&soroban_sdk::vec![&env, non_admin], &bad_hash);
+}
+
+// Issue #563: is_merchant_registered (public) must not bump the merchant entry's TTL.
+#[test]
+fn is_merchant_registered_is_ttl_neutral() {
+    let (env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
+
+    // Advance the ledger so that any TTL bump would be observable.
+    env.ledger()
+        .with_mut(|l| l.sequence_number += 100);
+
+    // Record the TTL immediately before the public read.
+    let ttl_before = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&DataKey::Merchant(merchant.clone()))
+    });
+
+    // The public query must succeed and return true.
+    assert!(client.is_merchant_registered(&merchant));
+
+    // The merchant entry TTL must NOT have increased.
+    let ttl_after = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&DataKey::Merchant(merchant.clone()))
+    });
+    assert!(
+        ttl_after <= ttl_before,
+        "is_merchant_registered must be TTL-neutral (before={ttl_before}, after={ttl_after})"
+    );
 }
