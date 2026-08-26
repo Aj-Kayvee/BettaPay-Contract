@@ -5,7 +5,9 @@ use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, Env, FromVal, Symbol, TryFromVal};
 
-use bettapay_common::constants::RECOVERY_DELAY_SECONDS;
+use bettapay_common::constants::{
+    BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS,
+};
 use bettapay_common::events::{AdminTransferred, PendingRecovery};
 use bettapay_common::storage::CommonDataKey;
 
@@ -388,6 +390,20 @@ fn set_default_rule_rejects_fee_above_max_fee_bps() {
         auto_settle: true,
     };
     client.set_default_rule(&admins, &rule);
+}
+
+#[test]
+fn bootstrap_default_rule_satisfies_setter_fee_validation() {
+    let rule = BOOTSTRAP_DEFAULT_RULE;
+
+    assert!(rule.platform_fee_bps >= MIN_FEE_BPS);
+    assert_eq!(rule.network_fee_bps, MIN_FEE_BPS);
+    assert!(rule.platform_fee_bps <= MAX_FEE_BPS);
+    assert!(rule.network_fee_bps <= MAX_FEE_BPS);
+    assert!(rule.platform_fee_bps <= BPS_DENOMINATOR);
+    assert!(rule.network_fee_bps <= BPS_DENOMINATOR);
+    assert!(rule.platform_fee_bps + rule.network_fee_bps <= BPS_DENOMINATOR);
+    assert!(rule.settlement_delay_ledger <= MAX_SETTLEMENT_DELAY_LEDGER);
 }
 
 // ---------------------------------------------------------------------------
