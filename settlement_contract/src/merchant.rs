@@ -81,6 +81,19 @@ impl SettlementContract {
 
         env.storage().persistent().remove(&key);
 
+        // Orphan the merchant's payment history: an ArchivedMerchant tombstone
+        // makes every existing payment record unreadable for the rest of its
+        // TTL (issue #490). The tombstone survives re-registration, so a
+        // re-registered merchant cannot resurrect records from an earlier
+        // registration either.
+        let archived_key = DataKey::ArchivedMerchant(merchant.clone());
+        env.storage().persistent().set(&archived_key, &());
+        env.storage().persistent().extend_ttl(
+            &archived_key,
+            MERCHANT_TTL_THRESHOLD,
+            MERCHANT_TTL_BUMP,
+        );
+
         let rule_key = DataKey::Rule(merchant.clone());
         let old_rule: Option<SettlementRule> = env.storage().persistent().get(&rule_key);
         if let Some(old_rule) = old_rule {
