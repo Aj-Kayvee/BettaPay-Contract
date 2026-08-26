@@ -732,7 +732,12 @@ impl GovernanceContract {
 }
 
 fn read_admins(env: &Env) -> Vec<Address> {
-    storage::bump_instance_ttl(env);
+    // Admin reads use the 50k/100k instance policy (issue #515), matching
+    // settlement's `read_admins` and ADR 003's "Admin & Governance" guidance,
+    // rather than the standard 14/30-day `bump_instance_ttl` policy.
+    env.storage()
+        .instance()
+        .extend_ttl(READ_INSTANCE_TTL_THRESHOLD, READ_INSTANCE_TTL_BUMP);
     env.storage()
         .instance()
         .get(&DataKey::Admin)
@@ -1671,5 +1676,23 @@ mod tests {
 
         assert_eq!(client.get_admin(), vec![&env, recovered.clone()]);
         assert_eq!(client.get_threshold(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #515: governance admin reads use the 50k/100k instance policy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_admin_uses_50k_100k_instance_ttl_policy() {
+        use soroban_sdk::testutils::storage::Instance;
+        let (env, client, _admins, _recovery) = setup();
+
+        client.get_admin();
+
+        let ttl = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+        assert!(
+            ttl >= READ_INSTANCE_TTL_BUMP,
+            "expected get_admin to bump instance TTL to at least {READ_INSTANCE_TTL_BUMP}, got {ttl}"
+        );
     }
 }
