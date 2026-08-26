@@ -29,6 +29,7 @@ fmt:
 
 test:
 	cargo test --workspace
+	cargo test --workspace --release
 
 check:
 	cargo check --workspace
