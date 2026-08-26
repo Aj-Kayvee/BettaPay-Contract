@@ -175,7 +175,7 @@ impl SettlementContract {
     /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not registered.
     /// * [`InvalidPaymentReference`](SettlementError::InvalidPaymentReference) — if `reference` is all zeros.
     /// * [`AmountTooSmall`](SettlementError::AmountTooSmall) — if `amount` is below the minimum.
-    /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists.
+    /// * [`DuplicatePaymentReference`](SettlementError::DuplicatePaymentReference) — if the reference already exists for this merchant.
     /// * [`AmountOverflow`](SettlementError::AmountOverflow) — if `amount * bps` would overflow `i128`.
     ///
     /// ## Emitted Event: `payment_stored`
@@ -210,7 +210,11 @@ impl SettlementContract {
             panic_with_error!(&env, SettlementError::AmountTooSmall);
         }
 
-        let payment_key = DataKey::Payment(reference.clone());
+        // Reference uniqueness is scoped to the merchant: the same reference
+        // may be used by two different merchants, so the key carries the
+        // merchant alongside the reference (issue #493). A duplicate is only
+        // a duplicate for the same merchant.
+        let payment_key = DataKey::Payment(merchant.clone(), reference.clone());
         if env.storage().persistent().has(&payment_key) {
             panic_with_error!(&env, SettlementError::DuplicatePaymentReference);
         }
@@ -221,6 +225,7 @@ impl SettlementContract {
         // contract, the `has` check above will catch it. This dummy record is 
         // overwritten by the actual record at the end of this function.
         let dummy_record = PaymentRecord {
+            merchant: merchant.clone(),
             amount: 0,
             platform_fee_amount: 0,
             network_fee_amount: 0,
@@ -236,6 +241,7 @@ impl SettlementContract {
         let rule = read_rule_or_default(&env, merchant.clone());
         let split = calculate_split(&env, amount, &rule);
         let record = PaymentRecord {
+            merchant: merchant.clone(),
             amount,
             platform_fee_amount: split.platform_fee_amount,
             network_fee_amount: split.network_fee_amount,
@@ -284,9 +290,25 @@ impl SettlementContract {
         calculate_split(&env, amount, &rule)
     }
 
-    /// Retrieve a payment record by its reference, extending the storage TTL if found.
-    pub fn get_payment_reference(env: Env, reference: BytesN<32>) -> Option<PaymentRecord> {
-        let key = DataKey::Payment(reference);
+    /// Retrieve a payment record for a merchant by its reference, extending
+    /// the storage TTL if found.
+    ///
+    /// The reference is resolved within the merchant's own namespace, so the
+    /// same reference held by a different merchant is not returned.
+    ///
+    /// # Panics
+    ///
+    /// * Auth failure — if the caller is not the merchant who owns the
+    ///   record. Reads are gated behind the merchant's own authorization so
+    ///   the gross/fee/net amounts cannot be probed by anyone who can guess
+    ///   a reference (issue #492).
+    pub fn get_payment_reference(
+        env: Env,
+        merchant: Address,
+        reference: BytesN<32>,
+    ) -> Option<PaymentRecord> {
+        merchant.require_auth();
+        let key = DataKey::Payment(merchant, reference);
         let record: Option<PaymentRecord> = env.storage().persistent().get(&key);
         if record.is_some() {
             // `extend_ttl` only writes when the current TTL is below
@@ -300,17 +322,26 @@ impl SettlementContract {
         record
     }
 
-    /// Retrieve multiple payment records by a vector of references.
+    /// Retrieve multiple payment records for a merchant by a vector of references.
     ///
-    /// The returned vector contains only records that exist.
-    pub fn get_payments(env: Env, refs: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
+    /// References are resolved within the merchant's own namespace and the
+    /// returned vector contains only records that exist.
+    ///
+    /// # Panics
+    ///
+    /// * Auth failure — if the caller is not the merchant who owns the
+    ///   records (issue #492).
+    /// * [`BatchTooLarge`](SettlementError::BatchTooLarge) — if `refs` exceeds
+    ///   [`MAX_PAYMENTS_BATCH`].
+    pub fn get_payments(env: Env, merchant: Address, refs: Vec<BytesN<32>>) -> Vec<PaymentRecord> {
+        merchant.require_auth();
         if refs.len() > MAX_PAYMENTS_BATCH {
             panic_with_error!(env, SettlementError::BatchTooLarge);
         }
-        
+
         let mut payments = Vec::new(&env);
         for reference in refs.iter() {
-            let key = DataKey::Payment(reference);
+            let key = DataKey::Payment(merchant.clone(), reference);
             if let Some(payment) = env.storage().persistent().get::<_, PaymentRecord>(&key) {
                 payments.push_back(payment);
             }
