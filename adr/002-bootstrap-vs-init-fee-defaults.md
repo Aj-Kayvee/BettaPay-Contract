@@ -16,7 +16,7 @@ We chose a **bootstrap fallback approach**:
   ```rust
   const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
       platform_fee_bps: 100,  // 1%
-      network_fee_bps: 0,
+      network_fee_bps: 5,   // MIN_FEE_BPS
       settlement_delay_ledger: 0,
       auto_settle: false,
   };
@@ -33,5 +33,5 @@ We chose a **bootstrap fallback approach**:
 - ✅ Deployments with zero configuration: a contract can be initialized and immediately start processing payments without requiring a `set_default_rule` call.
 - ✅ The admin can postpone configuring the default rule; the 1% platform fee (100 bps) is a reasonable production default.
 - ✅ Avoids an extra `init()` parameter, keeping the initialization interface simple.
-- ❌ If the desired default differs from 100 bps / 0 bps, a separate `set_default_rule()` call is needed after init.
+- ❌ If the desired default differs from 100 bps / 5 bps, a separate `set_default_rule()` call is needed after init.
 - ⚠️ The `bootstrap_fallback` event must be monitored in production to detect when the fallback is triggered, as it may indicate a configuration gap.

@@ -177,6 +177,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use bettapay_common::constants::MIN_FEE_BPS;
 use soroban_sdk::contract;
 
 pub use errors::SettlementError;
@@ -230,7 +231,7 @@ pub(crate) const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 // Used until the admin sets a global default settlement rule.
 pub(crate) const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
     platform_fee_bps: 100,
-    network_fee_bps: 0,
+    network_fee_bps: MIN_FEE_BPS,
     settlement_delay_ledger: 0,
     auto_settle: false,
 };

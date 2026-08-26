@@ -103,10 +103,10 @@ fn settlement_falls_back_to_bootstrap_without_governance_fee_config() {
     settle_client.register_merchant(&settle_admins, &merchant);
 
     let split = settle_client.calculate_fee_split(&merchant, &10_000);
-    // Bootstrap default is 100 bps platform, 0 network — fee = 100, merchant = 9900.
+    // Bootstrap default is 100 bps platform, 5 network — fee = 105, merchant = 9895.
     assert_eq!(split.platform_fee_amount, 100);
-    assert_eq!(split.network_fee_amount, 0);
-    assert_eq!(split.merchant_amount, 9_900);
+    assert_eq!(split.network_fee_amount, 5);
+    assert_eq!(split.merchant_amount, 9_895);
 }
 
 // ---------------------------------------------------------------------------
@@ -685,11 +685,11 @@ fn store_payment_reference_accepts_amount_at_min() {
         split.gross_amount,
         "fee legs plus merchant amount must reconstruct the gross amount"
     );
-    // Bootstrap default rule applies (100 bps platform, 0 network): at the floor
-    // the platform fee is exactly 1 unit, with no ceil-rounding overshoot.
+    // Bootstrap default rule applies (100 bps platform, 5 network): at the floor
+    // each fee leg rounds up to 1 unit.
     assert_eq!(split.platform_fee_amount, 1);
-    assert_eq!(split.network_fee_amount, 0);
-    assert_eq!(split.merchant_amount, 99);
+    assert_eq!(split.network_fee_amount, 1);
+    assert_eq!(split.merchant_amount, 98);
 }
 
 // ---------------------------------------------------------------------------
