@@ -85,6 +85,9 @@ impl SettlementContract {
 
         env.storage().persistent().remove(&key);
 
+        // We intentionally read the default rule directly from storage rather
+        // than using `read_rule_or_default` to avoid mistakenly emitting a
+        // `bootstrap_fallback` event during the clearing process.
         let fallback = env
             .storage()
             .persistent()
