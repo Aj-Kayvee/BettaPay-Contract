@@ -191,6 +191,7 @@ fn bootstrap_fallback_uses_canonical_topic() {
 #[test]
 fn clear_settlement_rule_emits_only_one_event() {
     let (env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
 
     let rule = SettlementRule {
         platform_fee_bps: 250,
