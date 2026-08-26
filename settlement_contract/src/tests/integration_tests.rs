@@ -9,6 +9,7 @@
 //! suites in `admin_tests.rs` and the governance crate's own modules.
 
 use crate::*;
+use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, BytesN, Env, FromVal, Symbol, TryFromVal, Vec};
 
@@ -696,8 +697,40 @@ fn store_payment_reference_accepts_amount_at_min() {
 // Issue 494: Normalized Error Tests
 // ---------------------------------------------------------------------------
 
+proptest! {
+    #[test]
+    fn public_calculate_fee_split_matches_ceil_invariant(
+        amount in MIN_PAYMENT_AMOUNT..=1_000_000_000i128,
+        (platform_fee_bps, network_fee_bps) in
+            (5u32..=5_000, 5u32..=5_000)
+                .prop_filter("fee sum must fit the denominator", |(platform, network)| {
+                    *platform + *network <= BPS_DENOMINATOR
+                }),
+    ) {
+        let (env, _gov_client, gov_admins, settle_client, settle_admins, merchant) = setup_both();
+        settle_client.register_merchant(&settle_admins, &merchant);
+        let rule = SettlementRule {
+            platform_fee_bps,
+            network_fee_bps,
+            settlement_delay_ledger: 0,
+            auto_settle: false,
+        };
+        settle_client.set_default_rule(&settle_admins, &rule);
+
+        let split = settle_client.calculate_fee_split(&merchant, &amount);
+        let denom = BPS_DENOMINATOR as i128;
+        let platform = (amount * platform_fee_bps as i128 + denom - 1) / denom;
+        let network = (amount * network_fee_bps as i128 + denom - 1) / denom;
+
+        prop_assert_eq!(split.gross_amount, amount);
+        prop_assert_eq!(split.platform_fee_amount, platform);
+        prop_assert_eq!(split.network_fee_amount, network);
+        prop_assert_eq!(split.merchant_amount, (amount - platform - network).max(0));
+        let _ = (env, gov_admins);
+    }
+}
+
 #[test]
-#[should_panic(expected = "Error(Contract, #313)")]
 fn calculate_fee_split_rejects_amount_zero() {
     let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
     settle_client.register_merchant(&settle_admins, &merchant);

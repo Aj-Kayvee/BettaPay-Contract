@@ -92,6 +92,59 @@ mod tests {
 
     proptest! {
         #[test]
+        fn split_matches_ceil_arithmetic_and_never_negative_merchant(
+            amount in 1i128..=1_000_000_000,
+            platform_fee_bps in 0u32..=10_000,
+            network_fee_bps in 0u32..=10_000,
+        ) {
+            let env = Env::default();
+            let rule = SettlementRule {
+                platform_fee_bps,
+                network_fee_bps,
+                settlement_delay_ledger: 0,
+                auto_settle: false,
+            };
+
+            let split = calculate_split(&env, amount, &rule);
+            let denom = BPS_DENOMINATOR as i128;
+            let expected_platform =
+                (amount * platform_fee_bps as i128 + denom - 1) / denom;
+            let expected_network =
+                (amount * network_fee_bps as i128 + denom - 1) / denom;
+            let expected_merchant =
+                (amount - expected_platform - expected_network).max(0);
+
+            prop_assert_eq!(split.gross_amount, amount);
+            prop_assert_eq!(split.platform_fee_amount, expected_platform);
+            prop_assert_eq!(split.network_fee_amount, expected_network);
+            prop_assert_eq!(split.merchant_amount, expected_merchant);
+            prop_assert!(split.merchant_amount >= 0);
+        }
+
+        #[test]
+        fn zero_fee_legs_preserve_the_gross_amount(
+            amount in 1i128..=i128::MAX,
+        ) {
+            let env = Env::default();
+            let rule = SettlementRule {
+                platform_fee_bps: 0,
+                network_fee_bps: 0,
+                settlement_delay_ledger: 0,
+                auto_settle: false,
+            };
+
+            let split = calculate_split(&env, amount, &rule);
+
+            prop_assert_eq!(split.platform_fee_amount, 0);
+            prop_assert_eq!(split.network_fee_amount, 0);
+            prop_assert_eq!(split.merchant_amount, amount);
+            prop_assert_eq!(
+                split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+                amount,
+            );
+        }
+
+        #[test]
         fn extreme_fees_clamp_merchant_amount_to_zero(
             amount in 1i128..=10,
         ) {
