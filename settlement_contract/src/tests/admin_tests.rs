@@ -313,6 +313,7 @@ fn set_default_rule_rejected_when_paused() {
     client.pause(&admins);
     assert!(client.is_paused());
 
+    // Attempt to set a valid default rule; this should be rejected due to the pause state
     let rule = SettlementRule {
         platform_fee_bps: 250,
         network_fee_bps: 50,
