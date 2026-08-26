@@ -744,11 +744,21 @@ fn cross_merchant_reference_reuse_is_allowed() {
     settle_client.store_payment_reference(&merchant2, &reference, &2_000);
 
     // Reads are scoped to the merchant namespace and records carry ownership.
-    let rec_a = settle_client.get_payment_reference(&merchant, &reference).unwrap();
-    let rec_b = settle_client.get_payment_reference(&merchant2, &reference).unwrap();
+    let rec_a = settle_client
+        .get_payment_reference(&merchant, &reference)
+        .unwrap();
+    let rec_b = settle_client
+        .get_payment_reference(&merchant2, &reference)
+        .unwrap();
 
-    assert_eq!(rec_a.merchant, merchant, "record A must attribute merchant A");
-    assert_eq!(rec_b.merchant, merchant2, "record B must attribute merchant B");
+    assert_eq!(
+        rec_a.merchant, merchant,
+        "record A must attribute merchant A"
+    );
+    assert_eq!(
+        rec_b.merchant, merchant2,
+        "record B must attribute merchant B"
+    );
     assert_eq!(rec_a.amount, 1_000);
     assert_eq!(rec_b.amount, 2_000);
 
@@ -849,7 +859,9 @@ fn payments_of_unregistered_merchant_are_orphaned() {
 
     // While registered, the merchant can read its own record.
     assert!(
-        settle_client.get_payment_reference(&merchant, &reference).is_some(),
+        settle_client
+            .get_payment_reference(&merchant, &reference)
+            .is_some(),
         "registered merchant must be able to read its own payment"
     );
 
@@ -857,9 +869,7 @@ fn payments_of_unregistered_merchant_are_orphaned() {
     assert!(!settle_client.is_merchant_registered(&merchant));
 
     // Post-unregister reads are rejected with PaymentOrphaned (#315).
-    let orphaned = soroban_sdk::Error::from_contract_error(
-        SettlementError::PaymentOrphaned as u32,
-    );
+    let orphaned = soroban_sdk::Error::from_contract_error(SettlementError::PaymentOrphaned as u32);
     let single = settle_client.try_get_payment_reference(&merchant, &reference);
     assert!(
         matches!(single, Err(Ok(ref err)) if *err == orphaned),
@@ -1069,7 +1079,9 @@ fn off_chain_settlement_readiness_logic() {
     env.ledger().with_mut(|l| l.sequence_number = 1000);
     settle_client.store_payment_reference(&merchant, &reference, &10_000);
 
-    let record = settle_client.get_payment_reference(&merchant, &reference).unwrap();
+    let record = settle_client
+        .get_payment_reference(&merchant, &reference)
+        .unwrap();
     assert_eq!(record.ledger, 1000);
     assert_eq!(record.settlement_delay_ledger, 10);
     
