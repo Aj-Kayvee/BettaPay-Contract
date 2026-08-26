@@ -108,6 +108,12 @@ pub struct FeeSplit {
 #[derive(Clone)]
 #[contracttype]
 pub struct PaymentRecord {
+    /// The merchant the payment belongs to.
+    ///
+    /// Payments are keyed by `(merchant, reference)` (see [`DataKey::Payment`])
+    /// and this field makes the ownership explicit on every record so callers
+    /// and indexers never have to infer it from the storage key.
+    pub merchant: Address,
     /// The total gross amount of the payment processed.
     /// Set upon payment creation and used to derive the fee split.
     pub amount: i128,
@@ -185,8 +191,12 @@ pub(crate) enum DataKey {
     Rule(Address),
     /// Persistent — single value but may be updated.
     DefaultRule,
-    /// Persistent — one per payment, high volume.
-    Payment(BytesN<32>),
+    /// Persistent — one per (merchant, reference), high volume.
+    ///
+    /// Reference uniqueness is scoped to the merchant (issue #493): the same
+    /// 32-byte reference may be used by two different merchants, so the key
+    /// carries the merchant alongside the reference.
+    Payment(Address, BytesN<32>),
     /// Storage key for a scheduled operation.
     ScheduledOperation(BytesN<32>),
 }

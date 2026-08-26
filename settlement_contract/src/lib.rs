@@ -97,10 +97,11 @@
 //!    struct — the old type is what keeps those entries readable.
 //! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
 //!    post-upgrade state, then remove the migration code in a later upgrade.
-//! 5. `Payment(BytesN<32>)`, `Merchant(Address)` and `Rule(Address)` are keyed
-//!    by value and Soroban cannot enumerate storage keys — which is why
-//!    [`SettlementContract::get_payments`] takes the references from the
-//!    caller. Convert these lazily on read, or pass the keys in explicitly.
+//! 5. `Payment(Address, BytesN<32>)`, `Merchant(Address)` and `Rule(Address)`
+//!    are keyed by value and Soroban cannot enumerate storage keys — which is
+//!    why [`SettlementContract::get_payments`] takes the merchant and the
+//!    references from the caller. Convert these lazily on read, or pass the
+//!    keys in explicitly.
 //! 6. Call `extend_ttl` on anything the migration rewrites: `set` alone does
 //!    not extend an entry's life, so a migrated record would otherwise expire
 //!    sooner than an untouched one.

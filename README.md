@@ -447,8 +447,8 @@ pub struct PaymentRecord {
 | `is_merchant_registered`| `merchant: Address` | `bool` | None | None | Checks if a merchant is present in the registry. |
 | `get_settlement_rule`| `merchant: Address` | `Option<SettlementRule>` | None | None | Reads the merchant-specific settlement rule override. |
 | `calculate_fee_split`| `merchant: Address`, `amount: i128` | `FeeSplit` | None | `MerchantMissing`, `InvalidAmount` | Performs a dry-run calculation of fees for the merchant without mutating storage. |
-| `get_payment_reference`| `reference: BytesN<32>` | `Option<PaymentRecord>` | None | None | Returns the logged payment record. Refreshes the entry's TTL when queried. |
-| `get_payments` | `references: Vec<BytesN<32>>` | `Vec<PaymentRecord>` | None | None | Batch retrieves logged payment records. Missing references are ignored. |
+| `get_payment_reference`| `merchant: Address`, `reference: BytesN<32>` | `Option<PaymentRecord>` | None | None | Returns the merchant's logged payment record for the reference. Refreshes the entry's TTL when queried. |
+| `get_payments` | `merchant: Address`, `references: Vec<BytesN<32>>` | `Vec<PaymentRecord>` | None | None | Batch retrieves the merchant's logged payment records. Missing references are ignored. |
 
 ---
 

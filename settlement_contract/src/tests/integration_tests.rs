@@ -229,7 +229,7 @@ fn stored_payment_record_uses_propagated_governance_fees_when_no_explicit_rule()
     assert_eq!(split.merchant_amount, 9_700);
 
     let record = settle_client
-        .get_payment_reference(&payment_ref)
+        .get_payment_reference(&merchant, &payment_ref)
         .expect("payment record must exist");
     assert_eq!(record.amount, amount);
     assert_eq!(record.platform_fee_amount, 200);
@@ -605,7 +605,7 @@ fn full_lifecycle_configure_governance_then_process_payments() {
 
     // 5. Verify each payment locked in the custom rule BPS & correct ceil-rounding splits.
     let check = |idx: u32, r: BytesN<32>, a: i128| {
-        let rec = settle_client.get_payment_reference(&r).unwrap();
+        let rec = settle_client.get_payment_reference(&merchant, &r).unwrap();
         assert_eq!(
             rec.platform_fee_bps, 150,
             "payment {idx} uses merchant rule BPS"
@@ -641,7 +641,7 @@ fn full_lifecycle_configure_governance_then_process_payments() {
     assert_eq!(stored_fees.network_fee_bps, 50);
 
     // 7. Batch-read returns consistent ordering & length.
-    let records = settle_client.get_payments(&refs);
+    let records = settle_client.get_payments(&merchant, &refs);
     assert_eq!(records.len(), 4);
     for i in 0..amounts.len() as u32 {
         assert_eq!(records.get(i).unwrap().amount, amounts[i as usize]);
@@ -718,6 +718,60 @@ fn calculate_fee_split_rejects_amount_below_min() {
     let (_env, _gov, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
     settle_client.register_merchant(&settle_admins, &merchant);
     settle_client.calculate_fee_split(&merchant, &(MIN_PAYMENT_AMOUNT - 1));
+}
+
+// ---------------------------------------------------------------------------
+// Issue 493: Payment references are scoped per merchant
+// ---------------------------------------------------------------------------
+
+/// The same 32-byte reference must be usable by two different merchants:
+/// uniqueness is scoped to `(merchant, reference)`, so one merchant can no
+/// longer squat on a reference to block another merchant (cross-merchant DoS).
+/// Each record must also carry its own merchant attribution.
+#[test]
+fn cross_merchant_reference_reuse_is_allowed() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    let merchant2 = Address::generate(&env);
+
+    settle_client.register_merchant(&settle_admins, &merchant);
+    settle_client.register_merchant(&settle_admins, &merchant2);
+
+    let reference = BytesN::<32>::from_array(&env, &[7u8; 32]);
+
+    // Merchant A stores the reference first.
+    settle_client.store_payment_reference(&merchant, &reference, &1_000);
+    // Merchant B is free to use the very same reference — no squatting.
+    settle_client.store_payment_reference(&merchant2, &reference, &2_000);
+
+    // Reads are scoped to the merchant namespace and records carry ownership.
+    let rec_a = settle_client.get_payment_reference(&merchant, &reference).unwrap();
+    let rec_b = settle_client.get_payment_reference(&merchant2, &reference).unwrap();
+
+    assert_eq!(rec_a.merchant, merchant, "record A must attribute merchant A");
+    assert_eq!(rec_b.merchant, merchant2, "record B must attribute merchant B");
+    assert_eq!(rec_a.amount, 1_000);
+    assert_eq!(rec_b.amount, 2_000);
+
+    // Batch reads are scoped identically: merchant A only sees its own record.
+    let refs = soroban_sdk::vec![&env, reference.clone()];
+    let batch_a = settle_client.get_payments(&merchant, &refs);
+    assert_eq!(batch_a.len(), 1);
+    assert_eq!(batch_a.get(0).unwrap().merchant, merchant);
+    assert_eq!(batch_a.get(0).unwrap().amount, 1_000);
+}
+
+/// Within a single merchant, the reference stays unique: storing the same
+/// reference twice for the same merchant must still be rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #303)")]
+fn same_merchant_duplicate_reference_is_rejected() {
+    let (env, _gov_client, _gov_admins, settle_client, settle_admins, merchant) = setup_both();
+    settle_client.register_merchant(&settle_admins, &merchant);
+
+    let reference = BytesN::<32>::from_array(&env, &[8u8; 32]);
+    settle_client.store_payment_reference(&merchant, &reference, &1_000);
+    // Same merchant + same reference -> duplicate.
+    settle_client.store_payment_reference(&merchant, &reference, &2_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -805,27 +859,27 @@ fn store_payment_reference_prevents_reentrancy() {
 #[test]
 #[should_panic(expected = "Error(Contract, #314)")]
 fn get_payments_rejects_batch_too_large() {
-    let (env, _gov, _gov_admins, settle_client, _settle_admins, _merchant) = setup_both();
-    
+    let (env, _gov, _gov_admins, settle_client, _settle_admins, merchant) = setup_both();
+
     let mut refs = Vec::new(&env);
     // Create MAX_PAYMENTS_BATCH + 1 elements
     for i in 0..101u8 {
         refs.push_back(BytesN::<32>::from_array(&env, &[i; 32]));
     }
-    
-    settle_client.get_payments(&refs);
+
+    settle_client.get_payments(&merchant, &refs);
 }
 
 #[test]
 fn get_payments_accepts_max_batch_size() {
-    let (env, _gov, _gov_admins, settle_client, _settle_admins, _merchant) = setup_both();
-    
+    let (env, _gov, _gov_admins, settle_client, _settle_admins, merchant) = setup_both();
+
     let mut refs = Vec::new(&env);
     for i in 0..100u8 {
         refs.push_back(BytesN::<32>::from_array(&env, &[i; 32]));
     }
-    
-    let payments = settle_client.get_payments(&refs);
+
+    let payments = settle_client.get_payments(&merchant, &refs);
     assert_eq!(payments.len(), 0); // No payments stored, but succeeds
 }
 
@@ -851,7 +905,7 @@ fn off_chain_settlement_readiness_logic() {
     env.ledger().with_mut(|l| l.sequence_number = 1000);
     settle_client.store_payment_reference(&merchant, &reference, &10_000);
 
-    let record = settle_client.get_payment_reference(&reference).unwrap();
+    let record = settle_client.get_payment_reference(&merchant, &reference).unwrap();
     assert_eq!(record.ledger, 1000);
     assert_eq!(record.settlement_delay_ledger, 10);
     
