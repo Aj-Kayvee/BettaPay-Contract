@@ -593,6 +593,12 @@ impl GovernanceContract {
         env.storage().persistent().get(&storage_key)
     }
 
+    /// Sets the global fee configuration.
+    ///
+    /// **Fee Ceiling Policy**: Governance is the trust root for cross-contract fee ceilings.
+    /// While individual fees are bounded by `MAX_FEE_BPS` and their sum by `BPS_DENOMINATOR`,
+    /// Governance is fully trusted to set safe rates within those technical boundaries.
+    ///
     pub fn set_fee_config(env: Env, signers: Vec<Address>, config: FeeConfig) {
         assert_not_paused(&env);
         verify_admin_auth(&env, &signers, read_threshold(&env));
@@ -1006,6 +1012,34 @@ mod tests {
         assert_eq!(event_admin, admins.get(0).unwrap());
         assert_eq!(event_cfg.platform_fee_bps, 120);
         assert_eq!(event_cfg.network_fee_bps, 35);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #4)")]
+    fn set_fee_config_rejects_fees_exceeding_ceiling() {
+        let (_env, client, admins, _recovery) = setup();
+        
+        // Sum exceeds BPS_DENOMINATOR
+        let cfg = FeeConfig {
+            platform_fee_bps: 5_000,
+            network_fee_bps: 5_001,
+        };
+
+        client.set_fee_config(&admins, &cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #4)")]
+    fn set_fee_config_rejects_individual_fee_exceeding_max() {
+        let (_env, client, admins, _recovery) = setup();
+        
+        // Individual fee exceeds MAX_FEE_BPS (governance trust root)
+        let cfg = FeeConfig {
+            platform_fee_bps: 5_001,
+            network_fee_bps: 0,
+        };
+
+        client.set_fee_config(&admins, &cfg);
     }
 
     #[test]
