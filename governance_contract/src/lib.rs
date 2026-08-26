@@ -478,8 +478,13 @@ impl GovernanceContract {
             panic_with_error!(&env, GovernanceError::RecoveryDelayActive);
         }
 
-        let old_admins = read_admins(&env);
-        let old_admin = storage::primary_admin(&old_admins).unwrap();
+        // Issue #514: never let event-building read the possibly-corrupt admin
+        // entry and abort recovery before it can repair the set. Resolve the
+        // old admin to `Option` and fall back to the zero-address sentinel
+        // when the entry is missing or has no primary admin, so recovery
+        // always succeeds in replacing the set.
+        let old_admin = read_optional_primary_admin(&env);
+
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
         env.storage().instance().set(&DataKey::Admin, &new_admins);
         env.storage().instance().set(&CommonDataKey::Threshold, &1u32);
@@ -810,6 +815,22 @@ fn read_schema_version(env: &Env) -> u32 {
         .instance()
         .get(&DataKey::SchemaVersion)
         .unwrap_or(CURRENT_SCHEMA_VERSION)
+}
+
+/// Returns the primary admin address, or the zero-address sentinel when the
+/// admin entry is missing or has no primary. Used only by `execute_recovery`,
+/// which must be able to repair a corrupt admin set (issue #514).
+fn read_optional_primary_admin(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get::<_, Vec<Address>>(&DataKey::Admin)
+        .and_then(|admins| storage::primary_admin(&admins))
+        .unwrap_or_else(|| {
+            Address::from_string(&soroban_sdk::String::from_str(
+                env,
+                "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            ))
+        })
 }
 
 fn assert_not_zero(env: &Env, address: &Address, error: GovernanceError) {
@@ -1623,5 +1644,32 @@ mod tests {
         let (_env, client, admins, _recovery) = setup();
         client.pause(&admins);
         client.migrate(&admins);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #514: execute_recovery repairs a corrupt/empty admin set
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn execute_recovery_repairs_an_empty_corrupt_admin_set() {
+        use soroban_sdk::testutils::Ledger;
+        let (env, client, _admins, _recovery_address) = setup();
+        let recovered = Address::generate(&env);
+
+        client.initiate_recovery(&recovered);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + RECOVERY_DELAY_SECONDS + 1);
+
+        // Corrupt the admin entry: overwrite with an empty admin set so there
+        // is no primary admin to read when building the recovery event.
+        env.as_contract(&client.address, || {
+            let empty: Vec<Address> = Vec::new(&env);
+            env.storage().instance().set(&DataKey::Admin, &empty);
+        });
+
+        client.execute_recovery();
+
+        assert_eq!(client.get_admin(), vec![&env, recovered.clone()]);
+        assert_eq!(client.get_threshold(), 1);
     }
 }
