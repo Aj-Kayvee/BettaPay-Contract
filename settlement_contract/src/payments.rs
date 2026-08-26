@@ -87,6 +87,7 @@ mod tests {
                 split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
                 split.gross_amount,
             );
+        }
     }
 
     proptest! {

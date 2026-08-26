@@ -297,7 +297,7 @@ fn clear_settlement_rule_rejected_when_paused() {
 #[test]
 #[should_panic(expected = "Error(Contract, #6)")]
 fn register_merchant_rejects_admin_address() {
-    let (_env, client, admins, _gov, _rec) = setup();
+    let (_env, client, admins, _merchant) = setup();
     let admin = admins.get(0).unwrap();
 
     // The admin cannot be registered as a merchant
@@ -305,12 +305,16 @@ fn register_merchant_rejects_admin_address() {
 }
 
 #[test]
+// SettlementError::Paused maps to error code 5
 #[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
+    
+    // Pause the contract to simulate an emergency state
     client.pause(&admins);
-    assert!(client.is_paused());
+    assert_eq!(client.is_paused(), true, "Contract must be paused before testing rejection");
 
+    // Attempt to set a valid default rule; this should be rejected due to the pause state
     let rule = SettlementRule {
         platform_fee_bps: 250,
         network_fee_bps: 50,

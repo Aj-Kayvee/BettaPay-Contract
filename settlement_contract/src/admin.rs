@@ -403,6 +403,15 @@ impl SettlementContract {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
+    /// Internal method to register a merchant.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`EmptyAddress`](SettlementError::EmptyAddress) — if the provided merchant address is empty.
+    /// * [`ZeroAddress`](SettlementError::ZeroAddress) — if the provided merchant address is the zero address.
+    /// * [`InvalidAdmin`](SettlementError::InvalidAdmin) — if attempting to register an admin as a merchant.
+    /// * [`MerchantExists`](SettlementError::MerchantExists) — if the merchant is already registered.
     fn _register_merchant(env: &Env, merchant: Address) {
         assert_not_paused(env);
         validate_nonzero_address(
@@ -439,6 +448,12 @@ impl SettlementContract {
         );
     }
 
+    /// Internal method to unregister a merchant.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not currently registered.
     fn _unregister_merchant(env: &Env, merchant: Address) {
         assert_not_paused(env);
         let admin = read_admin(env);

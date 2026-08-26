@@ -187,3 +187,29 @@ fn bootstrap_fallback_uses_canonical_topic() {
         Symbol::new(&env, events::BOOTSTRAP_FALLBACK_EVENT)
     );
 }
+
+#[test]
+fn clear_settlement_rule_emits_only_one_event() {
+    let (env, client, admins, merchant) = setup();
+    client.register_merchant(&admins, &merchant);
+
+    let rule = SettlementRule {
+        platform_fee_bps: 250,
+        network_fee_bps: 50,
+        settlement_delay_ledger: 0,
+        auto_settle: false,
+    };
+    client.set_settlement_rule(&admins, &merchant, &rule);
+
+    let before = env.events().all().len();
+    client.clear_settlement_rule(&admins, &merchant);
+    let after = env.events().all().len();
+
+    // Only one event emitted: SETTLEMENT_RULE_CLEARED_EVENT.
+    // The bootstrap fallback event should NOT be emitted during this call.
+    assert_eq!(after - before, 1);
+    assert_eq!(
+        last_topic(&env),
+        Symbol::new(&env, events::SETTLEMENT_RULE_CLEARED_EVENT)
+    );
+}
