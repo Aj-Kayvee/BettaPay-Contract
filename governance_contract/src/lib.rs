@@ -218,6 +218,10 @@ const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 // `bettapay_common::storage::CommonDataKey` instead of here - see that
 // type's doc comment for why a shared key type is safe to mix with this
 // contract's own storage without a migration.
+//
+// The schema-version marker (issue #507) is instance storage and is written
+// at `init`, so the first real storage migration has a defined baseline to
+// distinguish "pre-marker" from "current" data.
 #[derive(Clone)]
 #[contracttype]
 enum DataKey {
@@ -232,7 +236,15 @@ enum DataKey {
 
     /// Storage key for the anchor address associated with a specific asset.
     Anchor(Address),
+
+    /// Instance-storage schema version (u32) written at `init`. Baseline for
+    /// the first storage migration (issue #507).
+    SchemaVersion,
 }
+
+/// The schema version this build expects. `init` writes this value and
+/// `migrate` advances any stored value below it.
+const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 // Discriminants below are pinned to `bettapay_common::error_codes` so that a
 // numeric error code means the same thing in both contracts (issue #517).
@@ -345,6 +357,9 @@ impl GovernanceContract {
         env.storage()
             .instance()
             .set(&CommonDataKey::RecoveryAddress, &recovery_address);
+        env.storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
         let admin = admins.get(0).unwrap();
         env.events()
             .publish((Symbol::new(&env, events::INITIALIZED_EVENT),), admin);
@@ -557,6 +572,29 @@ impl GovernanceContract {
         storage::is_paused(&env)
     }
 
+    /// Idempotent schema migration entry point.
+    ///
+    /// Issue #507: ships the schema-version marker and a migration entry point
+    /// so the first real storage migration has a defined baseline. There is no
+    /// existing storage-format difference to convert yet, so calling `migrate`
+    /// simply confirms the `SchemaVersion` marker. It is admin-gated and
+    /// idempotent: a contract already at `CURRENT_SCHEMA_VERSION` is a no-op.
+    pub fn migrate(env: Env, signers: Vec<Address>) {
+        assert_not_paused(&env);
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
+
+        if read_schema_version(&env) < CURRENT_SCHEMA_VERSION {
+            env.storage()
+                .instance()
+                .set(&DataKey::SchemaVersion, &CURRENT_SCHEMA_VERSION);
+        }
+        env.events().publish(
+            (Symbol::new(&env, events::MIGRATED_EVENT),),
+            (admin, CURRENT_SCHEMA_VERSION),
+        );
+    }
+
     pub fn update_system_param(env: Env, signers: Vec<Address>, key: Symbol, value: i128) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
 
@@ -762,6 +800,16 @@ fn read_pending_recovery(env: &Env) -> PendingRecovery {
         .instance()
         .get(&CommonDataKey::PendingRecovery)
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::RecoveryNotPending))
+}
+
+/// Returns the instance-storage schema version, defaulting to the current
+/// version when the marker is absent. Per DEVELOPMENT.md, an entry written
+/// before the marker existed is treated as version 1 (issue #507).
+fn read_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::SchemaVersion)
+        .unwrap_or(CURRENT_SCHEMA_VERSION)
 }
 
 fn assert_not_zero(env: &Env, address: &Address, error: GovernanceError) {
@@ -1535,5 +1583,45 @@ mod tests {
             .deployer()
             .upload_contract_wasm(soroban_sdk::Bytes::from_slice(&env, &[]));
         client.upgrade(&soroban_sdk::vec![&env, non_admin], &bad_hash);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #507: schema-version marker + migrate skeleton
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn init_writes_schema_version_marker_and_migrate_is_idempotent() {
+        let (env, client, admins, _recovery) = setup();
+
+        let version = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get::<_, u32>(&DataKey::SchemaVersion)
+        });
+        assert_eq!(version, Some(CURRENT_SCHEMA_VERSION));
+
+        client.migrate(&admins);
+        client.migrate(&admins);
+
+        let version_after = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get::<_, u32>(&DataKey::SchemaVersion)
+        });
+        assert_eq!(version_after, Some(CURRENT_SCHEMA_VERSION));
+
+        let (_, topics, _) = env.events().all().last().unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            Symbol::new(&env, events::MIGRATED_EVENT)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn migrate_is_blocked_while_paused() {
+        let (_env, client, admins, _recovery) = setup();
+        client.pause(&admins);
+        client.migrate(&admins);
     }
 }
