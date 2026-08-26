@@ -1,2 +1,4 @@
 /settlement_contract/ @team-settlement
 /governance_contract/ @team-governance
+/scripts/ @team-devops
+Makefile @team-devops
