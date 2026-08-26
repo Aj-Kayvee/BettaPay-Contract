@@ -27,11 +27,14 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
 
     // Guard against `amount * bps + (denom - 1)` overflowing i128 before it is attempted below,
     // so callers get a readable AmountOverflow error instead of a raw arithmetic-overflow panic.
-    // The `denom - 1` term (the ceil-rounding adjustment) is subtracted from the budget up front
-    // so the check stays exact at the boundary instead of leaving a narrow window where the
-    // multiplication is "safe" but the following `+ denom - 1` still overflows.
+    // Checked arithmetic keeps the guard unconditional, including when both fee legs are zero,
+    // and checks the ceil-rounding adjustment as well as the multiplication at the boundary.
     let max_bps = core::cmp::max(platform_bps.as_i128(), network_bps.as_i128());
-    if max_bps > 0 && amount > (i128::MAX - (denom - 1)) / max_bps {
+    if amount
+        .checked_mul(max_bps)
+        .and_then(|numerator| numerator.checked_add(denom - 1))
+        .is_none()
+    {
         panic_with_error!(env, SettlementError::AmountOverflow);
     }
 
@@ -52,6 +55,38 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
         platform_fee_amount,
         network_fee_amount,
         merchant_amount,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn zero_fee_split_handles_maximum_amounts(
+            amount in crate::MIN_PAYMENT_AMOUNT..=i128::MAX,
+        ) {
+            let env = Env::default();
+            let rule = SettlementRule {
+                platform_fee_bps: 0,
+                network_fee_bps: 0,
+                settlement_delay_ledger: 0,
+                auto_settle: false,
+            };
+
+            let split = calculate_split(&env, amount, &rule);
+
+            prop_assert_eq!(split.gross_amount, amount);
+            prop_assert_eq!(split.platform_fee_amount, 0);
+            prop_assert_eq!(split.network_fee_amount, 0);
+            prop_assert_eq!(split.merchant_amount, amount);
+            prop_assert_eq!(
+                split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
+                split.gross_amount,
+            );
+        }
     }
 }
 
