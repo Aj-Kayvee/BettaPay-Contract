@@ -252,12 +252,9 @@ impl SettlementContract {
     }
 
     /// Schedules an administrative operation to be executed after a timelock.
-    pub fn schedule(env: Env, caller: Address, operation: Operation, execute_in: u64) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, SettlementError::Unauthorized);
-        }
-        caller.require_auth();
+    pub fn schedule(env: Env, signers: Vec<Address>, operation: Operation, execute_in: u64) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let caller = signers.get(0).unwrap();
 
         if execute_in < DEFAULT_TIMELOCK_DELAY_SECONDS {
             panic_with_error!(&env, SettlementError::ExecutionNotReady);
@@ -326,12 +323,9 @@ impl SettlementContract {
     }
 
     /// Cancels a scheduled administrative operation.
-    pub fn cancel(env: Env, caller: Address, operation: Operation) {
-        let admin = read_admin(&env);
-        if caller != admin {
-            panic_with_error!(&env, SettlementError::Unauthorized);
-        }
-        caller.require_auth();
+    pub fn cancel(env: Env, signers: Vec<Address>, operation: Operation) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let caller = signers.get(0).unwrap();
 
         let op_hash: BytesN<32> = env.crypto().sha256(&operation.clone().to_xdr(&env)).into();
         let key = DataKey::ScheduledOperation(op_hash.clone());
