@@ -187,7 +187,7 @@ impl SettlementContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::Threshold, &new_threshold);
+            .set(&CommonDataKey::Threshold, &new_threshold);
         env.events().publish(
             (Symbol::new(&env, events::THRESHOLD_CHANGED_EVENT),),
             (current_threshold, new_threshold),

@@ -137,9 +137,13 @@ pub struct PaymentRecord {
     pub auto_settle: bool,
 }
 
+/// The fee configuration schema as returned by the governance contract.
+///
+/// This type exists solely for decoding cross-contract calls from governance.
+/// It is never written to settlement's own storage.
 #[derive(Clone)]
 #[contracttype]
-pub struct FeeConfig {
+pub struct GovFeeConfig {
     pub platform_fee_bps: u32,
     pub network_fee_bps: u32,
 }
@@ -173,12 +177,6 @@ pub enum Operation {
 pub(crate) enum DataKey {
     /// Instance — singleton, read on every mutating call.
     Admin,
-    /// Instance — singleton u32 threshold for multisig operations.
-    Threshold,
-    /// Instance — singleton address, rarely changes.
-    RecoveryAddress,
-    /// Instance — singleton boolean flag, read on every mutating call.
-    PendingRecovery,
     /// Instance — singleton address, rarely changes.
     Governance,
     /// Persistent — one per merchant, many entries.
@@ -189,8 +187,6 @@ pub(crate) enum DataKey {
     DefaultRule,
     /// Persistent — one per payment, high volume.
     Payment(BytesN<32>),
-    /// Instance — singleton boolean, read on every mutating call.
-    Paused,
     /// Storage key for a scheduled operation.
     ScheduledOperation(BytesN<32>),
 }
