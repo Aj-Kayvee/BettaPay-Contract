@@ -295,6 +295,16 @@ fn clear_settlement_rule_rejected_when_paused() {
 
 // Issue #231: the global default settlement rule must not be updated while paused.
 #[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn register_merchant_rejects_admin_address() {
+    let (_env, client, admins, _gov, _rec) = setup();
+    let admin = admins.get(0).unwrap();
+
+    // The admin cannot be registered as a merchant
+    client.register_merchant(&admins, &admin);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();

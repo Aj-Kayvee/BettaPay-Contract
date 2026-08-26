@@ -12,14 +12,14 @@ use crate::{
 
 /// Computes the platform, network, and merchant fee amounts for an amount using ceil-based rounding.
 ///
-/// # Known edge case: negative merchant amount
+/// # Known edge case: clamping merchant amount
 ///
 /// Ceiling rounding of both fees independently can make
 /// `platform_fee_amount + network_fee_amount > amount` for small gross amounts
-/// (e.g. `amount = 1`, `platform_fee_bps = 5000`, `network_fee_bps = 5000`),
-/// which yields a **negative** `merchant_amount`. This is intentional with the
-/// current rounding policy (fees are never under-collected); callers must treat
-/// a negative merchant payout as a known, documented outcome rather than a bug.
+/// (e.g. `amount = 1`, `platform_fee_bps = 5000`, `network_fee_bps = 5000`).
+/// This yields a negative subtraction remainder. The policy is to clamp the
+/// `merchant_amount` to zero, ensuring fees are not under-collected but the
+/// merchant never owes a negative balance for a settlement.
 fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
     let denom = BPS_DENOMINATOR as i128;
     let platform_bps = rule.platform_bps();
@@ -46,10 +46,11 @@ fn calculate_split(env: &Env, amount: i128, rule: &SettlementRule) -> FeeSplit {
     let network_fee_amount = network_bps.calculate_fee_ceil(amount);
 
     // The merchant amount is calculated as the subtraction remainder of the gross amount minus all rounded-up fees.
-    // This ensures the sum of the split amounts (platform fee + network fee + merchant share) always equals the gross amount.
-    // Consequence: The merchant absorbs all rounding dust. For very small gross amounts with high/extreme fee percentages,
-    // the sum of rounded-up fees can exceed the gross amount, resulting in a negative merchant payout.
-    let merchant_amount = amount - platform_fee_amount - network_fee_amount;
+    // This ensures the sum of the split amounts (platform fee + network fee + merchant share) always equals the gross amount,
+    // except when the remainder is negative. For very small gross amounts with high/extreme fee percentages,
+    // the sum of rounded-up fees can exceed the gross amount. We explicitly clamp the merchant amount to 0 in this case.
+    let remainder = amount - platform_fee_amount - network_fee_amount;
+    let merchant_amount = remainder.max(0);
     FeeSplit {
         gross_amount: amount,
         platform_fee_amount,
@@ -86,6 +87,26 @@ mod tests {
                 split.platform_fee_amount + split.network_fee_amount + split.merchant_amount,
                 split.gross_amount,
             );
+    }
+
+    proptest! {
+        #[test]
+        fn extreme_fees_clamp_merchant_amount_to_zero(
+            amount in 1i128..=10,
+        ) {
+            let env = Env::default();
+            let rule = SettlementRule {
+                platform_fee_bps: 5000,
+                network_fee_bps: 5000,
+                settlement_delay_ledger: 0,
+                auto_settle: false,
+            };
+
+            let split = calculate_split(&env, amount, &rule);
+
+            prop_assert!(split.platform_fee_amount > 0);
+            prop_assert!(split.network_fee_amount > 0);
+            prop_assert_eq!(split.merchant_amount, 0);
         }
     }
 }
