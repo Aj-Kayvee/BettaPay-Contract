@@ -145,7 +145,6 @@ mod tests {
                 amount,
             );
         }
-
         #[test]
         fn extreme_fees_clamp_merchant_amount_to_zero(
             amount in 1i128..=10,
