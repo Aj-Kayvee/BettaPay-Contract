@@ -197,6 +197,17 @@ targets and features, workspace tests, script smoke tests, WASM optimization,
 and the deployed-artifact size check. Run the same command locally to avoid CI
 failures.
 
+### Security documentation checks
+
+`scripts/tests/security_docs_test.sh` is a lightweight check that `SECURITY.md`
+still documents the vulnerability report template, the report owners, and the
+90-day disclosure window, and that `README.md` links to it. Run it after
+editing either file:
+
+```bash
+bash scripts/tests/security_docs_test.sh
+```
+
 ## Building WASM Binaries
 
 Optimized WASM artifacts are required for deployment:
