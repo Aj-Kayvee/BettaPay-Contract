@@ -305,6 +305,7 @@ fn register_merchant_rejects_admin_address() {
 }
 
 #[test]
+// SettlementError::Paused maps to error code 5
 #[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
