@@ -817,6 +817,7 @@ mod anchor_no_event_error_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use soroban_sdk::testutils::{Address as _, Events};
     use soroban_sdk::testutils::storage::Persistent;
     use soroban_sdk::{vec, Bytes, FromVal, String};
@@ -1198,6 +1199,91 @@ mod tests {
                 network_fee_bps: 5_000,
             },
         );
+    }
+
+    proptest! {
+        #[test]
+        fn valid_fee_configs_are_accepted(
+            (platform_fee_bps, network_fee_bps) in
+                (5u32..=5_000, 5u32..=5_000)
+                    .prop_filter("fee sum must fit the denominator", |(platform, network)| {
+                        *platform + *network <= BPS_DENOMINATOR
+                    }),
+        ) {
+            let env = Env::default();
+            let admin = Address::generate(&env);
+            let recovery = Address::generate(&env);
+            let admins = vec![&env, admin];
+            let contract_id = env.register_contract(None, GovernanceContract);
+            let client = GovernanceContractClient::new(&env, &contract_id);
+            client.init(&admins, &1, &recovery);
+
+            let config = FeeConfig {
+                platform_fee_bps,
+                network_fee_bps,
+            };
+            client.set_fee_config(&admins, &config);
+            let stored = client.get_fee_config().unwrap();
+            prop_assert_eq!(stored.platform_fee_bps, platform_fee_bps);
+            prop_assert_eq!(stored.network_fee_bps, network_fee_bps);
+        }
+
+        #[test]
+        fn fee_configs_with_an_out_of_range_leg_are_rejected(
+            platform_fee_bps in 0u32..=5_000,
+            network_fee_bps in 0u32..=5_000,
+            invalid_platform in any::<bool>(),
+        ) {
+            let invalid_value = if invalid_platform {
+                5_001
+            } else {
+                4
+            };
+            let config = if invalid_platform {
+                FeeConfig {
+                    platform_fee_bps: invalid_value,
+                    network_fee_bps,
+                }
+            } else {
+                FeeConfig {
+                    platform_fee_bps,
+                    network_fee_bps: invalid_value,
+                }
+            };
+            let env = Env::default();
+            let admin = Address::generate(&env);
+            let recovery = Address::generate(&env);
+            let admins = vec![&env, admin];
+            let contract_id = env.register_contract(None, GovernanceContract);
+            let client = GovernanceContractClient::new(&env, &contract_id);
+            client.init(&admins, &1, &recovery);
+
+            prop_assert!(client.try_set_fee_config(&admins, &config).is_err());
+        }
+
+        #[test]
+        fn threshold_validation_accepts_exact_admin_count_and_rejects_out_of_range(
+            admin_count in 1u32..=5,
+            threshold in 0u32..=6,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let mut admins = Vec::new(&env);
+            for _ in 0..admin_count {
+                admins.push_back(Address::generate(&env));
+            }
+            let recovery = Address::generate(&env);
+            let contract_id = env.register_contract(None, GovernanceContract);
+            let client = GovernanceContractClient::new(&env, &contract_id);
+
+            let result = client.try_init(&admins, &threshold, &recovery);
+            if threshold == 0 || threshold > admin_count {
+                prop_assert!(result.is_err());
+            } else {
+                prop_assert!(result.is_ok());
+                prop_assert_eq!(client.get_threshold(), threshold);
+            }
+        }
     }
 
     #[test]
