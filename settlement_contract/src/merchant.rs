@@ -63,6 +63,12 @@ impl SettlementContract {
         );
     }
 
+    /// Unregisters an existing merchant from the protocol.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`MerchantMissing`](SettlementError::MerchantMissing) — if the merchant is not currently registered.
     pub fn unregister_merchant(env: Env, signers: Vec<Address>, merchant: Address) {
         assert_not_paused(&env);
         verify_admin_auth(&env, &signers, read_threshold(&env));
