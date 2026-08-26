@@ -224,15 +224,6 @@ enum DataKey {
     /// Storage key for the contract admin addresses.
     Admin,
 
-    /// Storage key for the multisig admin threshold.
-    Threshold,
-
-    /// Storage key for the recovery address that can reset the admin.
-    RecoveryAddress,
-
-    /// Storage key for the pending recovery operation.
-    PendingRecovery,
-
     /// Storage key for arbitrary system parameters.
     SystemParam(Symbol),
 
@@ -241,9 +232,6 @@ enum DataKey {
 
     /// Storage key for the anchor address associated with a specific asset.
     Anchor(Address),
-
-    /// Storage key for the pause state flag.
-    Paused,
 }
 
 // Discriminants below are pinned to `bettapay_common::error_codes` so that a
@@ -353,7 +341,7 @@ impl GovernanceContract {
         env.storage().instance().set(&DataKey::Admin, &admins);
         env.storage()
             .instance()
-            .set(&DataKey::Threshold, &threshold);
+            .set(&CommonDataKey::Threshold, &threshold);
         env.storage()
             .instance()
             .set(&CommonDataKey::RecoveryAddress, &recovery_address);
@@ -479,7 +467,7 @@ impl GovernanceContract {
         let old_admin = storage::primary_admin(&old_admins).unwrap();
         let new_admins = soroban_sdk::vec![&env, pending.new_admin.clone()];
         env.storage().instance().set(&DataKey::Admin, &new_admins);
-        env.storage().instance().set(&DataKey::Threshold, &1u32);
+        env.storage().instance().set(&CommonDataKey::Threshold, &1u32);
         env.storage()
             .instance()
             .remove(&CommonDataKey::PendingRecovery);
@@ -517,7 +505,7 @@ impl GovernanceContract {
         env.storage().instance().set(&DataKey::Admin, &new_admins);
         env.storage()
             .instance()
-            .set(&DataKey::Threshold, &new_threshold);
+            .set(&CommonDataKey::Threshold, &new_threshold);
         events::emit_admin_transferred(
             &env,
             &AdminTransferred {
@@ -538,7 +526,7 @@ impl GovernanceContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::Threshold, &new_threshold);
+            .set(&CommonDataKey::Threshold, &new_threshold);
         env.events().publish(
             (Symbol::new(&env, events::THRESHOLD_CHANGED_EVENT),),
             (current_threshold, new_threshold),
@@ -705,7 +693,7 @@ fn read_admins(env: &Env) -> Vec<Address> {
 fn read_threshold(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&DataKey::Threshold)
+        .get(&CommonDataKey::Threshold)
         .unwrap_or_else(|| panic_with_error!(env, GovernanceError::NotInitialized))
 }
 
