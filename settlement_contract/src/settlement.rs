@@ -7,7 +7,7 @@ use bettapay_common::{
 
 use crate::errors::SettlementError;
 use crate::storage::{
-    assert_not_paused, is_merchant_registered_internal, read_rule_or_default, read_threshold,
+    assert_not_paused, is_merchant_registered_and_bump_ttl, read_rule_or_default, read_threshold,
     validate_fee_against_governance, verify_admin_auth,
 };
 use crate::types::{DataKey, SettlementRule};
@@ -30,7 +30,7 @@ impl SettlementContract {
 
         validate_fee_against_governance(&env, &rule);
 
-        if !is_merchant_registered_internal(&env, merchant.clone()) {
+        if !is_merchant_registered_and_bump_ttl(&env, merchant.clone()) {
             panic_with_error!(&env, SettlementError::MerchantMissing);
         }
         if rule.platform_fee_bps > BPS_DENOMINATOR || rule.network_fee_bps > BPS_DENOMINATOR {
