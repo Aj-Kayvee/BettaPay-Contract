@@ -1,11 +1,11 @@
 //! Tests for administrative entry points:
 //! `init`, `transfer_admin`, `pause`, `unpause`, `upgrade`, `recovery`.
 
-use crate::*;
 use crate::types::DataKey;
+use crate::*;
+use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, Env, FromVal, Symbol, TryFromVal};
-use soroban_sdk::testutils::storage::Persistent as _;
 
 use bettapay_common::constants::{
     BPS_DENOMINATOR, MAX_FEE_BPS, MIN_FEE_BPS, RECOVERY_DELAY_SECONDS,
@@ -309,10 +309,13 @@ fn register_merchant_rejects_admin_address() {
 #[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
-    
+
     // Pause the contract to simulate an emergency state
     client.pause(&admins);
-    assert!(client.is_paused(), "Contract must be paused before testing rejection");
+    assert!(
+        client.is_paused(),
+        "Contract must be paused before testing rejection"
+    );
 
     // Attempt to set a valid default rule; this should be rejected due to the pause state
     let rule = SettlementRule {
@@ -418,7 +421,10 @@ fn executes_contract_wasm_upgrade_successfully() {
 
     // Empty wasm has no `supports_interface` — upgrade must fail.
     let result = client.try_upgrade(&admins, &bad_hash);
-    assert!(result.is_err(), "upgrade with non-conforming wasm must be rejected");
+    assert!(
+        result.is_err(),
+        "upgrade with non-conforming wasm must be rejected"
+    );
 
     // Contract remains operational after the rejected upgrade.
     let live_client = SettlementContractClient::new(&env, &client.address);
@@ -572,8 +578,7 @@ fn is_merchant_registered_is_ttl_neutral() {
     client.register_merchant(&admins, &merchant);
 
     // Advance the ledger so that any TTL bump would be observable.
-    env.ledger()
-        .with_mut(|l| l.sequence_number += 100);
+    env.ledger().with_mut(|l| l.sequence_number += 100);
 
     // Record the TTL immediately before the public read.
     let ttl_before = env.as_contract(&client.address, || {
