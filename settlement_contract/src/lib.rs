@@ -97,10 +97,11 @@
 //!    struct — the old type is what keeps those entries readable.
 //! 4. Order is: upgrade the Wasm, then call `migrate`, then verify the
 //!    post-upgrade state, then remove the migration code in a later upgrade.
-//! 5. `Payment(BytesN<32>)`, `Merchant(Address)` and `Rule(Address)` are keyed
-//!    by value and Soroban cannot enumerate storage keys — which is why
-//!    [`SettlementContract::get_payments`] takes the references from the
-//!    caller. Convert these lazily on read, or pass the keys in explicitly.
+//! 5. `Payment(Address, BytesN<32>)`, `Merchant(Address)` and `Rule(Address)`
+//!    are keyed by value and Soroban cannot enumerate storage keys — which is
+//!    why [`SettlementContract::get_payments`] takes the merchant and the
+//!    references from the caller. Convert these lazily on read, or pass the
+//!    keys in explicitly.
 //! 6. Call `extend_ttl` on anything the migration rewrites: `set` alone does
 //!    not extend an entry's life, so a migrated record would otherwise expire
 //!    sooner than an untouched one.
@@ -179,10 +180,11 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use bettapay_common::constants::MIN_FEE_BPS;
 use soroban_sdk::contract;
 
 pub use errors::SettlementError;
-pub use types::{Bps, FeeSplit, GovFeeConfig, Operation, PaymentRecord, SettlementRule};
+pub use types::{Bps, FeeSplit, GovFeeConfig, Operation, PaymentRecord, ScheduledOp, SettlementRule};
 
 /// Minimum gross payment amount, in the asset's smallest unit.
 ///
@@ -232,7 +234,7 @@ pub(crate) const READ_INSTANCE_TTL_BUMP: u32 = 100_000;
 // Used until the admin sets a global default settlement rule.
 pub(crate) const BOOTSTRAP_DEFAULT_RULE: SettlementRule = SettlementRule {
     platform_fee_bps: 100,
-    network_fee_bps: 0,
+    network_fee_bps: MIN_FEE_BPS,
     settlement_delay_ledger: 0,
     auto_settle: false,
 };

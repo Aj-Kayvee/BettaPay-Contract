@@ -104,11 +104,11 @@ fn read_path_governance_none_falls_through_to_bootstrap() {
     client.init(&soroban_sdk::vec![&env, admin.clone()], &1, &empty_gov, &recovery);
     client.register_merchant(&soroban_sdk::vec![&env, admin], &merchant);
 
-    // Empty governance returns None — bootstrap default should apply (100 bps platform, 0 network).
+    // Empty governance returns None — bootstrap default should apply (100 bps platform, 5 network).
     let split = client.calculate_fee_split(&merchant, &10_000);
     assert_eq!(split.platform_fee_amount, 100);
-    assert_eq!(split.network_fee_amount, 0);
-    assert_eq!(split.merchant_amount, 9_900);
+    assert_eq!(split.network_fee_amount, 5);
+    assert_eq!(split.merchant_amount, 9_895);
 }
 
 // ---------------------------------------------------------------------------

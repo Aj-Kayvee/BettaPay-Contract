@@ -156,7 +156,50 @@ pub(crate) fn is_merchant_registered_read(env: &Env, merchant: Address) -> bool 
 }
 
 /// Returns whether a merchant has been registered and keeps the marker entry warm in storage.
+/// Panics with [`SettlementError::PaymentOrphaned`] when the merchant's
+/// payment records are no longer readable.
+///
+/// Policy (issue #490): unregistering a merchant orphans its payment
+/// records. `unregister_merchant` writes an `ArchivedMerchant` tombstone that
+/// survives re-registration, and a merchant that was never registered has no
+/// readable history either. A payment read therefore requires both a live
+/// merchant marker and no tombstone.
+pub(crate) fn assert_payments_readable(env: &Env, merchant: &Address) {
+    let registered = is_merchant_registered_internal(env, merchant.clone());
+    let archived = env
+        .storage()
+        .persistent()
+        .has(&DataKey::ArchivedMerchant(merchant.clone()));
+    if !registered || archived {
+        panic_with_error!(env, SettlementError::PaymentOrphaned);
+    }
+}
+
+/// Returns whether a merchant has been registered.
+///
+/// TTL-neutral: does not touch the merchant marker's TTL. Use this from
+/// public/unauthenticated read paths (`is_merchant_registered`,
+/// `calculate_fee_split`) — those are callable by anyone for any merchant
+/// address, so if they bumped the TTL a third party could keep an arbitrary
+/// merchant's marker alive indefinitely, subverting natural eviction.
+/// Merchant- or admin-authenticated paths that need to keep an active
+/// merchant's marker warm should use
+/// [`is_merchant_registered_and_bump_ttl`] instead.
 pub(crate) fn is_merchant_registered_internal(env: &Env, merchant: Address) -> bool {
+    let key = DataKey::Merchant(merchant);
+    env.storage().persistent().has(&key)
+}
+
+/// Returns whether a merchant has been registered, keeping the marker entry
+/// warm in storage if so.
+///
+/// Only call this from a path that already required merchant or admin
+/// authentication for this action (e.g. `store_payment_reference`,
+/// `set_settlement_rule`) — never from a public/unauthenticated read, or a
+/// third party could use it as a liveness oracle to keep an arbitrary
+/// merchant's marker alive indefinitely. See
+/// [`is_merchant_registered_internal`] for the TTL-neutral read-only check.
+pub(crate) fn is_merchant_registered_and_bump_ttl(env: &Env, merchant: Address) -> bool {
     let key = DataKey::Merchant(merchant);
     let exists = env.storage().persistent().has(&key);
     if exists {
