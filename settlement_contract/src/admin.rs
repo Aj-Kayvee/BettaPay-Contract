@@ -25,7 +25,7 @@ use crate::{
 #[contractimpl]
 impl SettlementContract {
     pub fn supports_interface(_env: Env, version: u32) -> bool {
-        version == 1
+        version == crate::SUPPORTED_INTERFACE_VERSION
     }
 
     /// Initialize the contract with the given admin address.
