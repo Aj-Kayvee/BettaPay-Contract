@@ -149,7 +149,8 @@ fn setup_multisig() -> (Env, SettlementContractClient<'static>, soroban_sdk::Vec
     let governance = super::register_governance(&env);
     let contract_id = env.register_contract(None, crate::SettlementContract);
     let client = crate::SettlementContractClient::new(&env, &contract_id);
-    client.init(&admins, &2, &governance, &recovery);
+    let deployer = Address::generate(&env);
+    client.init(&deployer, &admins, &2, &governance, &recovery);
     let merchant = Address::generate(&env);
     (env, client, admins, merchant)
 }
@@ -183,7 +184,8 @@ fn timelocked_transfer_admin_parity_with_direct_path() {
     let client = SettlementContractClient::new(&env, &contract_id);
 
     let initial_admins = soroban_sdk::vec![&env, a1.clone()];
-    client.init(&initial_admins, &1, &governance, &recovery);
+    let deployer = Address::generate(&env);
+    client.init(&deployer, &initial_admins, &1, &governance, &recovery);
 
     // New admin set: three members, threshold 2 — same shape the direct path accepts.
     let new_admins = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
