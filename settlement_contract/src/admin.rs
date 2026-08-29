@@ -137,6 +137,27 @@ impl SettlementContract {
         events::emit_recovery_cancelled(&env, &admin);
     }
 
+    pub fn update_recovery_address(env: Env, signers: Vec<Address>, new_recovery: Address) {
+        verify_admin_auth(&env, &signers, read_threshold(&env));
+        let admin = signers.get(0).unwrap();
+        validate_nonzero_address(
+            &env,
+            &new_recovery,
+            SettlementError::InvalidRecoveryAddress,
+            SettlementError::InvalidRecoveryAddress,
+        );
+        env.storage()
+            .instance()
+            .set(&CommonDataKey::RecoveryAddress, &new_recovery);
+        env.events().publish(
+            (
+                Symbol::new(&env, events::RECOVERY_ADDRESS_UPDATED_EVENT),
+                new_recovery.clone(),
+            ),
+            admin,
+        );
+    }
+
     pub fn execute_recovery(env: Env) {
         let pending = read_pending_recovery(&env);
         if env.ledger().timestamp() < pending.execute_after {
@@ -168,6 +189,13 @@ impl SettlementContract {
     ) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
         validate_admins_and_threshold(&env, &new_admins, new_threshold);
+
+        // Enforce admin/merchant exclusivity in both directions (issue #692).
+        for i in 0..new_admins.len() {
+            if is_merchant_registered_and_bump_ttl(&env, new_admins.get(i).unwrap()) {
+                panic_with_error!(&env, SettlementError::InvalidAdmin);
+            }
+        }
 
         let old_admin = read_admin(&env);
         write_admins(&env, &new_admins, new_threshold);
@@ -325,11 +353,7 @@ impl SettlementContract {
 
         match operation {
             Operation::UpdateGovernance(new_gov) => Self::_update_governance(&env, new_gov),
-            Operation::CancelRecovery => {
-                let admin = read_admin(&env);
-                admin.require_auth();
-                Self::_cancel_recovery(&env)
-            }
+            Operation::CancelRecovery => Self::_cancel_recovery(&env),
             Operation::TransferAdmin(new_admins, new_threshold) => {
                 Self::_transfer_admin(&env, new_admins, new_threshold)
             }
@@ -411,6 +435,12 @@ impl SettlementContract {
     fn _transfer_admin(env: &Env, new_admins: Vec<Address>, new_threshold: u32) {
         let old_admin = read_admin(env);
         validate_admins_and_threshold(env, &new_admins, new_threshold);
+        // Enforce admin/merchant exclusivity in both directions (issue #692).
+        for i in 0..new_admins.len() {
+            if is_merchant_registered_and_bump_ttl(env, new_admins.get(i).unwrap()) {
+                panic_with_error!(env, SettlementError::InvalidAdmin);
+            }
+        }
         write_admins(env, &new_admins, new_threshold);
         let primary_new_admin = new_admins.get(0).unwrap();
         events::emit_admin_transferred(
