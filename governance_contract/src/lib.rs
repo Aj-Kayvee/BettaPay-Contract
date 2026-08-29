@@ -256,6 +256,15 @@ enum DataKey {
 /// `migrate` advances any stored value below it.
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+/// The single interface version advertised by `supports_interface`.
+///
+/// `upgrade` probes the incoming Wasm with `supports_interface(SUPPORTED_INTERFACE_VERSION)`
+/// before committing the swap. Any Wasm that returns `false` (or traps) is
+/// rejected with `InvalidWasmInterface`. Increment this constant in a future
+/// Wasm update when a breaking API change requires callers to distinguish
+/// the new contract from this one (issue #48).
+const SUPPORTED_INTERFACE_VERSION: u32 = 1;
+
 // Discriminants below are pinned to `bettapay_common::error_codes` so that a
 // numeric error code means the same thing in both contracts (issue #517).
 // Shared concepts use the registry's constant value directly; codes with no
@@ -323,7 +332,7 @@ pub struct GovernanceContract;
 #[contractimpl]
 impl GovernanceContract {
     pub fn supports_interface(_env: Env, version: u32) -> bool {
-        version == 1
+        version == SUPPORTED_INTERFACE_VERSION
     }
 
     /// Initialises the governance contract and sets the initial administrator.
@@ -957,6 +966,69 @@ mod tests {
     fn upload_test_wasm(env: &Env) -> BytesN<32> {
         let wasm = Bytes::from_slice(env, &[]);
         env.deployer().upload_contract_wasm(wasm)
+    }
+
+    // -----------------------------------------------------------------------
+    // supports_interface — issue #48
+    // -----------------------------------------------------------------------
+    //
+    // These tests pin the exact version semantics so the function can never
+    // silently degrade into an always-true stub.
+
+    /// Version 1 is the current advertised interface; `supports_interface(1)`
+    /// must return `true`.
+    #[test]
+    fn supports_interface_returns_true_for_current_version() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        assert!(
+            client.supports_interface(&SUPPORTED_INTERFACE_VERSION),
+            "supports_interface must return true for the current interface version ({})",
+            SUPPORTED_INTERFACE_VERSION,
+        );
+    }
+
+    /// Version 0 has never been a valid interface version; it must be rejected.
+    #[test]
+    fn supports_interface_returns_false_for_version_zero() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        assert!(
+            !client.supports_interface(&0u32),
+            "supports_interface must return false for version 0",
+        );
+    }
+
+    /// Version 2 is a hypothetical future version not yet implemented; it
+    /// must be rejected so callers can distinguish old Wasm from new.
+    #[test]
+    fn supports_interface_returns_false_for_unknown_future_version() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        assert!(
+            !client.supports_interface(&(SUPPORTED_INTERFACE_VERSION + 1)),
+            "supports_interface must return false for a future version not yet implemented",
+        );
+    }
+
+    /// A large sentinel value must also be rejected (issue #48: must not be
+    /// an always-true stub).
+    #[test]
+    fn supports_interface_returns_false_for_large_sentinel() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, GovernanceContract);
+        let client = GovernanceContractClient::new(&env, &contract_id);
+
+        assert!(
+            !client.supports_interface(&u32::MAX),
+            "supports_interface must return false for a large out-of-range version",
+        );
     }
 
     #[test]
