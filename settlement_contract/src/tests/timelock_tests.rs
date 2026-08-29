@@ -219,3 +219,71 @@ fn timelocked_transfer_admin_parity_with_direct_path() {
         "timelocked path stores the same threshold as the direct path"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Timelock Pause-Gating Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn schedule_rejects_when_contract_is_paused() {
+    let (_env, client, admins, merchant) = setup();
+    let operation = Operation::RegisterMerchant(merchant);
+
+    client.pause(&admins);
+    assert!(client.is_paused());
+
+    let result = client.try_schedule(&admins, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
+    assert!(
+        result.is_err(),
+        "schedule must be rejected while contract is paused"
+    );
+}
+
+#[test]
+fn cancel_rejects_when_contract_is_paused() {
+    let (_env, client, admins, merchant) = setup();
+    let operation = Operation::RegisterMerchant(merchant);
+
+    // Schedule while active
+    client.schedule(&admins, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
+
+    // Pause contract
+    client.pause(&admins);
+
+    let result = client.try_cancel(&admins, &operation);
+    assert!(
+        result.is_err(),
+        "cancel must be rejected while contract is paused"
+    );
+
+    // Unpause contract and verify cancel now works
+    client.unpause(&admins);
+    client.cancel(&admins, &operation);
+}
+
+#[test]
+fn execute_rejects_when_contract_is_paused_and_preserves_scheduled_op() {
+    let (env, client, admins, merchant) = setup();
+    let operation = Operation::RegisterMerchant(merchant.clone());
+
+    client.schedule(&admins, &operation, &DEFAULT_TIMELOCK_DELAY_SECONDS);
+
+    env.ledger()
+        .with_mut(|ledger| ledger.timestamp += DEFAULT_TIMELOCK_DELAY_SECONDS);
+
+    // Pause contract
+    client.pause(&admins);
+
+    let result = client.try_execute(&operation);
+    assert!(
+        result.is_err(),
+        "execute must be rejected while contract is paused"
+    );
+    assert!(!client.is_merchant_registered(&merchant));
+
+    // Unpause contract and verify execution succeeds
+    client.unpause(&admins);
+    client.execute(&operation);
+    assert!(client.is_merchant_registered(&merchant));
+}
+

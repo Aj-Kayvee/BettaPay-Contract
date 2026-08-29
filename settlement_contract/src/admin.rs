@@ -284,8 +284,16 @@ impl SettlementContract {
     }
 
     /// Schedules an administrative operation to be executed after a timelock.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if signers lack admin authority.
+    /// * [`ExecutionNotReady`](SettlementError::ExecutionNotReady) — if `execute_in` is less than `DEFAULT_TIMELOCK_DELAY_SECONDS`.
+    /// * [`OperationAlreadyScheduled`](SettlementError::OperationAlreadyScheduled) — if the operation is already in the queue.
     pub fn schedule(env: Env, signers: Vec<Address>, operation: Operation, execute_in: u64) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        assert_not_paused(&env);
         let caller = signers.get(0).unwrap();
 
         if execute_in < DEFAULT_TIMELOCK_DELAY_SECONDS {
@@ -327,7 +335,15 @@ impl SettlementContract {
     }
 
     /// Executes a previously scheduled administrative operation.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`OperationNotScheduled`](SettlementError::OperationNotScheduled) — if the operation was not scheduled.
+    /// * [`ExecutionNotReady`](SettlementError::ExecutionNotReady) — if the timelock delay has not elapsed.
     pub fn execute(env: Env, operation: Operation) {
+        assert_not_paused(&env);
+
         let operation_xdr = operation.clone().to_xdr(&env);
         let op_hash: BytesN<32> = env.crypto().sha256(&operation_xdr).into();
         let key = DataKey::ScheduledOperation(op_hash.clone());
@@ -374,8 +390,15 @@ impl SettlementContract {
     }
 
     /// Cancels a scheduled administrative operation.
+    ///
+    /// # Panics
+    ///
+    /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
+    /// * [`Unauthorized`](SettlementError::Unauthorized) — if signers lack admin authority.
+    /// * [`OperationNotScheduled`](SettlementError::OperationNotScheduled) — if the operation was not scheduled.
     pub fn cancel(env: Env, signers: Vec<Address>, operation: Operation) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        assert_not_paused(&env);
         let caller = signers.get(0).unwrap();
 
         let operation_xdr = operation.clone().to_xdr(&env);
