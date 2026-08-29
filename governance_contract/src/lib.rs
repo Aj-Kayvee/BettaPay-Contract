@@ -247,6 +247,9 @@ enum DataKey {
     /// Instance-storage schema version (u32) written at `init`. Baseline for
     /// the first storage migration (issue #507).
     SchemaVersion,
+    /// Instance — stored at `init` to gate initialization to the deployer
+    /// and prevent front-running (issue #684).
+    Deployer,
 }
 
 /// The schema version this build expects. `init` writes this value and
@@ -344,10 +347,12 @@ impl GovernanceContract {
     /// # Errors
     ///
     /// Panics with `GovernanceError::AlreadyInitialized` if already initialised.
-    pub fn init(env: Env, admins: Vec<Address>, threshold: u32, recovery_address: Address) {
+    pub fn init(env: Env, deployer: Address, admins: Vec<Address>, threshold: u32, recovery_address: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, GovernanceError::AlreadyInitialized);
         }
+        // Gate initialization to the deployer to prevent front-running (issue #684).
+        deployer.require_auth();
         validate_admins_and_threshold(&env, &admins, threshold);
         assert_not_zero(
             &env,
@@ -357,6 +362,7 @@ impl GovernanceContract {
         for i in 0..threshold {
             admins.get(i).unwrap().require_auth();
         }
+        env.storage().instance().set(&DataKey::Deployer, &deployer);
         env.storage().instance().set(&DataKey::Admin, &admins);
         env.storage()
             .instance()
