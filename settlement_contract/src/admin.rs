@@ -35,6 +35,7 @@ impl SettlementContract {
     /// * [`AlreadyInitialized`](SettlementError::AlreadyInitialized) — if the contract has already been initialized.
     pub fn init(
         env: Env,
+        deployer: Address,
         admins: Vec<Address>,
         threshold: u32,
         governance: Address,
@@ -43,6 +44,8 @@ impl SettlementContract {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, SettlementError::AlreadyInitialized);
         }
+        // Gate initialization to the deployer to prevent front-running (issue #684).
+        deployer.require_auth();
         validate_admins_and_threshold(&env, &admins, threshold);
         validate_governance(&env, &governance);
         validate_nonzero_address(
@@ -54,6 +57,7 @@ impl SettlementContract {
         for i in 0..threshold {
             admins.get(i).unwrap().require_auth();
         }
+        env.storage().instance().set(&DataKey::Deployer, &deployer);
         write_admins(&env, &admins, threshold);
         env.storage()
             .instance()
@@ -466,6 +470,12 @@ impl SettlementContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, MERCHANT_TTL_THRESHOLD, MERCHANT_TTL_BUMP);
+
+        // Remove any ArchivedMerchant tombstone from a prior registration so
+        // the re-registered merchant can read new payment records (issue #685).
+        let archived_key = DataKey::ArchivedMerchant(merchant.clone());
+        env.storage().persistent().remove(&archived_key);
+
         env.events().publish(
             (
                 Symbol::new(env, events::MERCHANT_REGISTERED_EVENT),
