@@ -235,16 +235,20 @@ impl SettlementContract {
 
     pub fn pause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        if storage::is_paused(&env) {
+            panic_with_error!(&env, SettlementError::AlreadyPaused);
+        }
         let admin = signers.get(0).unwrap();
-        storage::set_paused(&env, true);
-        events::emit_paused(&env, &admin);
+        storage::apply_pause(&env, &admin);
     }
 
     pub fn unpause(env: Env, signers: Vec<Address>) {
         verify_admin_auth(&env, &signers, read_threshold(&env));
+        if !storage::is_paused(&env) {
+            panic_with_error!(&env, SettlementError::AlreadyUnpaused);
+        }
         let admin = signers.get(0).unwrap();
-        storage::set_paused(&env, false);
-        events::emit_unpaused(&env, &admin);
+        storage::apply_unpause(&env, &admin);
     }
 
     pub fn is_paused(env: Env) -> bool {
