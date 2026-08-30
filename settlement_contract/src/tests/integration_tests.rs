@@ -974,7 +974,7 @@ fn timelocked_unregister_also_orphans_payments() {
     );
     env.ledger()
         .with_mut(|ledger| ledger.timestamp += DEFAULT_TIMELOCK_DELAY_SECONDS);
-    settle_client.execute(&operation);
+    settle_client.execute(&settle_admins.get(0).unwrap(), &operation);
 
     assert!(!settle_client.is_merchant_registered(&merchant));
     let result = settle_client.try_get_payment_reference(&merchant, &reference);
