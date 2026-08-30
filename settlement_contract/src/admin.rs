@@ -667,18 +667,13 @@ impl SettlementContract {
 
         let prev = env
             .storage()
-            .persistent()
+            .instance()
             .get::<_, SettlementRule>(&DataKey::DefaultRule)
             .unwrap_or(BOOTSTRAP_DEFAULT_RULE);
 
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::DefaultRule, &new_rule);
-        env.storage().persistent().extend_ttl(
-            &DataKey::DefaultRule,
-            RULE_TTL_THRESHOLD,
-            RULE_TTL_BUMP,
-        );
 
         env.events().publish(
             (Symbol::new(env, events::DEFAULT_RULE_UPDATED_EVENT),),
