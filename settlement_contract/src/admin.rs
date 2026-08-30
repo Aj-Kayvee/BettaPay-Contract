@@ -340,6 +340,22 @@ impl SettlementContract {
 
     /// Executes a previously scheduled administrative operation.
     ///
+    /// # Execution auth policy (uniform)
+    ///
+    /// `execute` deliberately performs **no caller authentication** for any
+    /// [`Operation`] variant handled below. Authorization is enforced at the
+    /// timelock boundary instead: [`schedule`](Self::schedule) (and
+    /// [`cancel`](Self::cancel)) require admin multisig auth via
+    /// `verify_admin_auth` against the stored threshold. Once an operation
+    /// has been scheduled by the admins and its timelock delay has elapsed,
+    /// execution is intentionally permissionless so any caller can trigger it
+    /// (issue #693). This is the single uniform policy for **every** variant
+    /// in the `match` below — including `CancelRecovery`, which historically
+    /// required primary-admin auth and was normalized to match the rest
+    /// (issue #561 / #693). No variant may add its own `require_auth` here;
+    /// if the policy ever changes, it must change for all variants at once
+    /// and be re-documented on this function.
+    ///
     /// # Panics
     ///
     /// * [`Paused`](SettlementError::Paused) — if the contract is currently paused.
