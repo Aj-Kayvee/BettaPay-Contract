@@ -242,12 +242,9 @@ pub(crate) fn read_rule_or_default(env: &Env, merchant: Address) -> SettlementRu
     let default_key = DataKey::DefaultRule;
     if let Some(rule) = env
         .storage()
-        .persistent()
+        .instance()
         .get::<_, SettlementRule>(&default_key)
     {
-        env.storage()
-            .persistent()
-            .extend_ttl(&default_key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
         return rule;
     }
     // Protocol fee source: governance's GovFeeConfig, when available.
@@ -270,12 +267,9 @@ pub(crate) fn read_fallback_rule(env: &Env) -> SettlementRule {
     let default_key = DataKey::DefaultRule;
     if let Some(rule) = env
         .storage()
-        .persistent()
+        .instance()
         .get::<_, SettlementRule>(&default_key)
     {
-        env.storage()
-            .persistent()
-            .extend_ttl(&default_key, RULE_TTL_THRESHOLD, RULE_TTL_BUMP);
         return rule;
     }
     if let Some(rule) = read_governance_fee_rule(env) {
