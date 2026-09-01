@@ -29,6 +29,7 @@ fn emits_event_on_initialization() {
     let governance = register_governance(&env);
     let contract_id = env.register_contract(None, SettlementContract);
     let client = SettlementContractClient::new(&env, &contract_id);
+    let deployer = Address::generate(&env);
 
     client.init(
         &deployer,
@@ -539,6 +540,7 @@ fn recovery_executes_after_delay() {
     let governance = register_governance(&env);
     let contract_id = env.register_contract(None, SettlementContract);
     let client = SettlementContractClient::new(&env, &contract_id);
+    let deployer = Address::generate(&env);
 
     client.init(
         &deployer,
