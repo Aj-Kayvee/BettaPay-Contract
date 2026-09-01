@@ -1,8 +1,8 @@
 //! Tests for administrative entry points:
 //! `init`, `transfer_admin`, `pause`, `unpause`, `upgrade`, `recovery`.
 
-use crate::*;
 use crate::types::DataKey;
+use crate::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, Env, FromVal, Symbol, TryFromVal};
 
@@ -29,6 +29,7 @@ fn emits_event_on_initialization() {
     let governance = register_governance(&env);
     let contract_id = env.register_contract(None, SettlementContract);
     let client = SettlementContractClient::new(&env, &contract_id);
+    let deployer = Address::generate(&env);
 
     client.init(
         &deployer,
@@ -83,7 +84,8 @@ fn rejects_reentrant_init_via_self_recursive_governance() {
     // malicious governance, which tries to reenter init on the settlement
     // contract. The call must fail (either the host reentry guard or the
     // init-in-progress marker catches it).
-    let result = client.try_init(&admins, &1, &reentrant_gov_id, &recovery_address);
+    let deployer = Address::generate(&env);
+    let result = client.try_init(&deployer, &admins, &1, &reentrant_gov_id, &recovery_address);
     assert!(result.is_err(), "reentrant init must be rejected");
 }
 
@@ -105,14 +107,13 @@ fn rejects_init_while_initializing_marker_is_set() {
 
     // Simulate an in-progress init by setting the Initializing marker.
     env.as_contract(&contract_id, || {
-        env.storage()
-            .instance()
-            .set(&DataKey::Initializing, &());
+        env.storage().instance().set(&DataKey::Initializing, &());
     });
 
     // init must reject because the Initializing marker is present.
     let client = SettlementContractClient::new(&env, &contract_id);
-    client.init(&admins, &1, &governance, &recovery_address);
+    let deployer = Address::generate(&env);
+    client.init(&deployer, &admins, &1, &governance, &recovery_address);
 }
 
 #[test]
@@ -420,10 +421,13 @@ fn register_merchant_rejects_admin_address() {
 #[should_panic(expected = "Error(Contract, #5)")]
 fn set_default_rule_rejected_when_paused() {
     let (_env, client, admins, _merchant) = setup();
-    
+
     // Pause the contract to simulate an emergency state
     client.pause(&admins);
-    assert_eq!(client.is_paused(), true, "Contract must be paused before testing rejection");
+    assert!(
+        client.is_paused(),
+        "Contract must be paused before testing rejection"
+    );
 
     // Attempt to set a valid default rule; this should be rejected due to the pause state
     let rule = SettlementRule {
@@ -529,7 +533,10 @@ fn executes_contract_wasm_upgrade_successfully() {
 
     // Empty wasm has no `supports_interface` — upgrade must fail.
     let result = client.try_upgrade(&admins, &bad_hash);
-    assert!(result.is_err(), "upgrade with non-conforming wasm must be rejected");
+    assert!(
+        result.is_err(),
+        "upgrade with non-conforming wasm must be rejected"
+    );
 
     // Contract remains operational after the rejected upgrade.
     let live_client = SettlementContractClient::new(&env, &client.address);
@@ -594,6 +601,7 @@ fn recovery_executes_after_delay() {
     let governance = register_governance(&env);
     let contract_id = env.register_contract(None, SettlementContract);
     let client = SettlementContractClient::new(&env, &contract_id);
+    let deployer = Address::generate(&env);
 
     client.init(
         &deployer,

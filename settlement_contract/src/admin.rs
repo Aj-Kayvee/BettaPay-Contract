@@ -11,9 +11,8 @@ use crate::errors::SettlementError;
 use crate::storage::{
     assert_not_paused, is_merchant_registered_and_bump_ttl, read_admin, read_admins,
     read_fallback_rule, read_governance, read_optional_primary_admin, read_pending_recovery,
-    read_recovery_address, read_rule_or_default, read_threshold,
-    validate_admins_and_threshold, validate_governance, validate_nonzero_address,
-    verify_admin_auth, write_admins,
+    read_recovery_address, read_rule_or_default, read_threshold, validate_admins_and_threshold,
+    validate_governance, validate_nonzero_address, verify_admin_auth, write_admins,
 };
 use crate::types::{DataKey, Operation, ScheduledOp, SettlementRule};
 use crate::{
@@ -53,9 +52,7 @@ impl SettlementContract {
 
         // Mark init as in-progress before any external call so that a
         // self-recursive governance contract cannot reenter this function.
-        env.storage()
-            .instance()
-            .set(&DataKey::Initializing, &());
+        env.storage().instance().set(&DataKey::Initializing, &());
 
         validate_governance(&env, &governance);
         validate_nonzero_address(
@@ -77,9 +74,7 @@ impl SettlementContract {
             .set(&CommonDataKey::RecoveryAddress, &recovery_address);
 
         // Init is complete — remove the in-progress marker.
-        env.storage()
-            .instance()
-            .remove(&DataKey::Initializing);
+        env.storage().instance().remove(&DataKey::Initializing);
     }
 
     pub fn is_initialized(env: Env) -> bool {
@@ -537,7 +532,7 @@ impl SettlementContract {
             SettlementError::EmptyAddress,
             SettlementError::ZeroAddress,
         );
-        
+
         // Prevent an admin from being registered as a merchant
         let admins = read_admins(env);
         for i in 0..admins.len() {

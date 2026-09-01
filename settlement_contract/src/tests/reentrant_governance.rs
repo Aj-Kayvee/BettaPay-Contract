@@ -21,16 +21,14 @@ pub struct ReentrantGovernance;
 #[contractimpl]
 impl ReentrantGovernance {
     pub fn get_fee_config(env: Env) -> Option<GovFeeConfig> {
-        let settlement: Address = env
-            .storage()
-            .instance()
-            .get(&TARGET_KEY)
-            .unwrap();
+        let settlement: Address = env.storage().instance().get(&TARGET_KEY).unwrap();
 
         let client = SettlementContractClient::new(&env, &settlement);
         // This must panic with AlreadyInitialized because the init-in-progress
         // marker is already set by the first (outer) init call.
+        let deployer = Address::generate(&env);
         client.init(
+            &deployer,
             &Vec::new(&env),
             &0,
             &settlement,

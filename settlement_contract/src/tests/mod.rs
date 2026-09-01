@@ -13,6 +13,7 @@ pub mod integration_tests;
 pub mod interface_tests;
 pub mod reentrant_governance;
 pub mod recovery_admin_set_tests;
+pub mod reentrant_governance;
 pub mod schedule_collision_tests;
 pub mod timelock_tests;
 
