@@ -266,7 +266,9 @@ fn init_succeeds_with_panicking_governance() {
     let client = SettlementContractClient::new(&env, &contract_id);
 
     // init must succeed directly with panicking_gov without cross-calling it
+    let deployer = Address::generate(&env);
     client.init(
+        &deployer,
         &soroban_sdk::vec![&env, admin.clone()],
         &1,
         &panicking_gov,
@@ -293,7 +295,8 @@ fn update_governance_succeeds_with_panicking_governance() {
     let client = SettlementContractClient::new(&env, &contract_id);
     let admins = soroban_sdk::vec![&env, admin];
 
-    client.init(&admins, &1, &empty_gov, &recovery);
+    let deployer = Address::generate(&env);
+    client.init(&deployer, &admins, &1, &empty_gov, &recovery);
     client.update_governance(&admins, &panicking_gov);
 
     assert_eq!(client.get_governance(), panicking_gov);
@@ -320,7 +323,9 @@ fn init_succeeds_with_reentrant_governance_and_prevents_double_init() {
         soroban_sdk::vec![&env, contract_id.to_val()],
     );
 
+    let deployer = Address::generate(&env);
     client.init(
+        &deployer,
         &soroban_sdk::vec![&env, admin.clone()],
         &1,
         &reentrant_gov_id,
@@ -332,6 +337,7 @@ fn init_succeeds_with_reentrant_governance_and_prevents_double_init() {
 
     // Reentry / second initialization must panic with AlreadyInitialized
     let res = client.try_init(
+        &deployer,
         &soroban_sdk::vec![&env, admin],
         &1,
         &reentrant_gov_id,

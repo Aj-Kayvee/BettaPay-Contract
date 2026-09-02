@@ -373,7 +373,6 @@ impl SettlementContract {
     /// * [`ExecutionNotReady`](SettlementError::ExecutionNotReady) — if the timelock delay has not elapsed.
     pub fn execute(env: Env, executor: Address, operation: Operation) {
         assert_not_paused(&env);
-        executor.require_auth();
 
         let operation_xdr = operation.clone().to_xdr(&env);
         let op_hash: BytesN<32> = env.crypto().sha256(&operation_xdr).into();
