@@ -11,7 +11,6 @@ pub mod fee_config_ordering_tests;
 pub mod governance_error_tests;
 pub mod integration_tests;
 pub mod interface_tests;
-pub mod reentrant_governance;
 pub mod recovery_admin_set_tests;
 pub mod reentrant_governance;
 pub mod schedule_collision_tests;

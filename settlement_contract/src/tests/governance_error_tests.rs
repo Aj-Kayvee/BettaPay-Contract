@@ -219,8 +219,8 @@ fn write_path_set_default_rule_governance_failure_surfaces_typed_error() {
 // ---------------------------------------------------------------------------
 
 mod reentrant_gov {
-    use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
     use crate::{GovFeeConfig, SettlementContractClient};
+    use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 
     /// A governance stub that attempts to call back into SettlementContract
     /// during `get_fee_config` (simulates reentrancy).
