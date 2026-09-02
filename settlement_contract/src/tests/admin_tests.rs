@@ -80,13 +80,13 @@ fn rejects_reentrant_init_via_self_recursive_governance() {
         stash_target(&env, &contract_id);
     });
 
-    // First init call: validate_governance invokes get_fee_config on the
-    // malicious governance, which tries to reenter init on the settlement
-    // contract. The call must fail (either the host reentry guard or the
-    // init-in-progress marker catches it).
+    // init now validates governance lazily (only at first fee-config use),
+    // so a self-recursive governance does not cause a reentrant call during
+    // init. The init-in-progress marker remains defence-in-depth but is
+    // never exercised here.
     let deployer = Address::generate(&env);
-    let result = client.try_init(&deployer, &admins, &1, &reentrant_gov_id, &recovery_address);
-    assert!(result.is_err(), "reentrant init must be rejected");
+    client.init(&deployer, &admins, &1, &reentrant_gov_id, &recovery_address);
+    assert_eq!(client.get_governance(), reentrant_gov_id);
 }
 
 // Issue #566: the init-in-progress marker directly guards against reinit.
